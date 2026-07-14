@@ -1,0 +1,12 @@
+[package]
+name = "agent-ferry-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "agentferry-host"
+path = "src/main.rs"

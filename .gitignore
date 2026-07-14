@@ -1,0 +1,7 @@
+/target/
+/extension/.wxt/
+/extension/.output/
+/extension/compile/
+/extension/node_modules/
+*.log
+.DS_Store
