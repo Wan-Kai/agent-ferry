@@ -1,6 +1,7 @@
 /target/
 /extension/.wxt/
 /extension/.output/
+/extension/dist/
 /extension/compile/
 /extension/node_modules/
 *.log

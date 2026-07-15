@@ -1,5 +1,5 @@
 [package]
-name = "agent-ferry-host"
+name = "agent-ferry-daemon"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,15 +11,13 @@ workspace = true
 agent-ferry-core = { path = "../agent-ferry-core" }
 agent-ferry-protocol = { path = "../agent-ferry-protocol" }
 serde_json.workspace = true
-thiserror.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [[bin]]
-name = "agentferry-host"
+name = "agentferryd"
 path = "src/main.rs"
 
 [dev-dependencies]
-agent-ferry-daemon = { path = "../agent-ferry-daemon" }
-tokio.workspace = true
 uuid.workspace = true

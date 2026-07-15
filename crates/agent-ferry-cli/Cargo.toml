@@ -7,6 +7,15 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+agent-ferry-core = { path = "../agent-ferry-core" }
+agent-ferry-protocol = { path = "../agent-ferry-protocol" }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
 [[bin]]
 name = "aferry"
 path = "src/main.rs"
