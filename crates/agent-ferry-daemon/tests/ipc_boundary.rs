@@ -44,6 +44,47 @@ fn failure_code(response: HostResponse) -> ErrorCode {
     }
 }
 
+fn assert_chrome_cannot_admin_or_run(paths: &AgentFerryPaths, token: &str) {
+    let extension_admin = send_as(
+        paths,
+        token.to_owned(),
+        ConnectorKind::ChromeNativeHost,
+        json!({
+            "protocol_version": 1,
+            "request_id": "extension-admin",
+            "command": {
+                "type": "connection_add",
+                "name": "forbidden",
+                "base_url": "http://127.0.0.1:8642",
+                "model": null,
+                "token": "must-not-be-stored"
+            }
+        }),
+    );
+    assert_eq!(failure_code(extension_admin), ErrorCode::PermissionDenied);
+    assert!(!paths.hermes_connections.exists());
+
+    let extension_direct_run = send_as(
+        paths,
+        token.to_owned(),
+        ConnectorKind::ChromeNativeHost,
+        json!({
+            "protocol_version": 1,
+            "request_id": "extension-direct-run",
+            "command": {
+                "type": "hermes_run",
+                "task_id": "task-1",
+                "target_id": "remote-1",
+                "input": "浏览器不能绕过页面交接边界直接执行任意 input"
+            }
+        }),
+    );
+    assert_eq!(
+        failure_code(extension_direct_run),
+        ErrorCode::PermissionDenied
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn socket_boundary_rejects_unauthorized_version_unknown_and_malformed_requests() {
     let root = temporary_root();
@@ -91,24 +132,7 @@ async fn socket_boundary_rejects_unauthorized_version_unknown_and_malformed_requ
         ErrorCode::ProtocolVersionUnsupported
     );
 
-    let extension_admin = send_as(
-        &paths,
-        token.clone(),
-        ConnectorKind::ChromeNativeHost,
-        json!({
-            "protocol_version": 1,
-            "request_id": "extension-admin",
-            "command": {
-                "type": "connection_add",
-                "name": "forbidden",
-                "base_url": "http://127.0.0.1:8642",
-                "model": null,
-                "token": "must-not-be-stored"
-            }
-        }),
-    );
-    assert_eq!(failure_code(extension_admin), ErrorCode::PermissionDenied);
-    assert!(!paths.hermes_connections.exists());
+    assert_chrome_cannot_admin_or_run(&paths, &token);
 
     let unknown_command = send_envelope(
         &paths,

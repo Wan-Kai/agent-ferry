@@ -7,6 +7,9 @@ use std::process::{Command, Stdio};
 
 use agent_ferry_core::AgentFerryPaths;
 use agent_ferry_daemon::Daemon;
+use agent_ferry_hermes::{
+    HermesConnection, KeychainCredentialStore, add_connection, remove_connection,
+};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -52,6 +55,84 @@ fn spawn_fake_hermes() -> (String, std::thread::JoinHandle<String>) {
                 .expect("写入 HTTP 响应");
             requests.push_str(&String::from_utf8(request).expect("请求应为 UTF-8"));
         }
+        requests
+    });
+    (format!("http://{address}"), task)
+}
+
+fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    let mut request = Vec::new();
+    let mut expected_length = None;
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let read = stream.read(&mut buffer).expect("读取 HTTP 请求");
+        assert!(read > 0, "HTTP 请求不应提前结束");
+        request.extend_from_slice(&buffer[..read]);
+        if expected_length.is_none()
+            && let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+        {
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().expect("Content-Length 合法"))
+                })
+                .unwrap_or(0);
+            expected_length = Some(header_end + 4 + content_length);
+        }
+        if expected_length.is_some_and(|length| request.len() >= length) {
+            return request;
+        }
+    }
+}
+
+fn write_http_response(stream: &mut std::net::TcpStream, content_type: &str, body: &str) {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(response.as_bytes())
+        .expect("写入 HTTP 响应");
+}
+
+fn spawn_fake_hermes_run() -> (String, std::thread::JoinHandle<Vec<Vec<u8>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("启动 fake Hermes Run");
+    let address = listener.local_addr().expect("读取 fake Hermes 地址");
+    let task = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+
+        let (mut capabilities, _) = listener.accept().expect("接受 capabilities");
+        requests.push(read_http_request(&mut capabilities));
+        write_http_response(
+            &mut capabilities,
+            "application/json",
+            r#"{"object":"hermes.api_server.capabilities","platform":"hermes-agent","model":"cli-run-e2e","features":{"run_submission":true,"run_status":true,"run_events_sse":true}}"#,
+        );
+
+        let (mut submission, _) = listener.accept().expect("接受 run submission");
+        requests.push(read_http_request(&mut submission));
+        write_http_response(
+            &mut submission,
+            "application/json",
+            r#"{"run_id":"run-cli-e2e","status":"started"}"#,
+        );
+
+        let (mut events, _) = listener.accept().expect("接受 SSE");
+        requests.push(read_http_request(&mut events));
+        write_http_response(
+            &mut events,
+            "text/event-stream",
+            concat!(
+                "data: {\"type\":\"run.started\"}\n\n",
+                "data: {\"type\":\"tool.started\",\"name\":\"terminal\"}\n\n",
+                "data: {\"type\":\"message.delta\",\"delta\":\"处理中\"}\n\n",
+                "data: {\"type\":\"tool.completed\",\"name\":\"terminal\"}\n\n",
+                "data: {\"type\":\"run.completed\",\"output\":\"完成且已持久化\"}\n\n"
+            ),
+        );
         requests
     });
     (format!("http://{address}"), task)
@@ -171,5 +252,69 @@ async fn cli_add_list_and_doctor_keep_token_out_of_files_and_output() {
         .await
         .expect("等待 daemon task")
         .expect("daemon 正常退出");
+    fs::remove_dir_all(root).expect("清理测试目录");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_run_submits_input_and_streams_logs_until_terminal() {
+    let root = temporary_root();
+    let paths = AgentFerryPaths::from_root(root.clone());
+    let (url, server) = spawn_fake_hermes_run();
+    let connection = HermesConnection::direct("cli-run-e2e", &url, None).expect("创建 Connection");
+    let connection_id = connection.id.clone();
+    add_connection(
+        &paths,
+        &KeychainCredentialStore,
+        connection,
+        b"cli-run-secret",
+    )
+    .expect("保存 Connection");
+
+    let daemon = Daemon::bind(paths.clone()).expect("绑定 daemon");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let daemon_task = tokio::spawn(daemon.serve_until(async {
+        let _ = shutdown_rx.await;
+    }));
+    let private_input = format!("只应发送给 Hermes 的输入 {}", Uuid::new_v4());
+    let mut run = Command::new(env!("CARGO_BIN_EXE_aferry"))
+        .env("AGENT_FERRY_HOME", &root)
+        .args(["connection", "run", "cli-run-e2e", "--input-stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("启动 Hermes Run");
+    run.stdin
+        .take()
+        .expect("获取 stdin")
+        .write_all(private_input.as_bytes())
+        .expect("写入 input");
+    let output = run.wait_with_output().expect("等待 Hermes Run");
+    assert!(
+        output.status.success(),
+        "run 失败: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout 为 UTF-8");
+    assert!(stdout.contains("Hermes Run 已提交: run-cli-e2e"));
+    assert!(stdout.contains("[tool:start] terminal"));
+    assert!(stdout.contains("[output] 处理中"));
+    assert!(stdout.contains("[result] 完成且已持久化"));
+    assert!(stdout.contains("Hermes Run 已完成"));
+    assert!(!stdout.contains(&private_input));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(&private_input));
+
+    let requests = server.join().expect("等待 fake Hermes");
+    let submission = String::from_utf8_lossy(&requests[1]);
+    assert!(submission.starts_with("POST /v1/runs HTTP/1.1"));
+    assert!(submission.contains(&private_input));
+
+    shutdown_tx.send(()).expect("停止 daemon");
+    daemon_task
+        .await
+        .expect("等待 daemon task")
+        .expect("daemon 正常退出");
+    remove_connection(&paths, &KeychainCredentialStore, &connection_id).expect("清理 Connection");
     fs::remove_dir_all(root).expect("清理测试目录");
 }

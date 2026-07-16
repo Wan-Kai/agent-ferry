@@ -17,8 +17,8 @@ use agent_ferry_protocol::{
     Command, ConnectionTransportConfig, ConnectorKind, ErrorCode, HandoffEvent, HandoffTargetKind,
     HandoffTargetState, HandoffTargetStatus, HandoffTransferAck, HandoffTransferPhase, HostRequest,
     HostResponse, IpcEnvelope, MAX_HANDOFF_CHUNK_BYTES, MAX_HANDOFF_CHUNKS,
-    MAX_HANDOFF_CONTENT_BYTES, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, ServiceState, SourceDocument,
-    SourceMetadata, StatusResult,
+    MAX_HANDOFF_CONTENT_BYTES, MAX_HERMES_RUN_INPUT_BYTES, MAX_MESSAGE_BYTES, PROTOCOL_VERSION,
+    ServiceState, SourceDocument, SourceMetadata, StatusResult,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -223,6 +223,23 @@ async fn handle_connection(
     );
     let request_id = request.request_id;
     match request.command {
+        Command::HermesRun {
+            task_id,
+            target_id,
+            input,
+        } => {
+            stream_cli_hermes_run(
+                &mut stream,
+                request_id,
+                task_id,
+                target_id,
+                input,
+                &envelope.connector,
+                paths,
+                hermes_client,
+            )
+            .await
+        }
         Command::Handoff {
             task_id,
             target_id,
@@ -418,7 +435,8 @@ async fn dispatch_request(
             )
             .await
         }
-        Command::Handoff { .. }
+        Command::HermesRun { .. }
+        | Command::Handoff { .. }
         | Command::HandoffBegin { .. }
         | Command::HandoffChunk { .. }
         | Command::HandoffEnd { .. } => HostResponse::failure(
@@ -459,6 +477,7 @@ fn decode_request(value: Value) -> Result<HostRequest, HostResponse> {
             "status"
                 | "connection_add"
                 | "connection_remove"
+                | "hermes_run"
                 | "handoff"
                 | "handoff_begin"
                 | "handoff_chunk"
@@ -792,6 +811,87 @@ async fn stream_handoff(
             .await;
         }
     };
+    stream_hermes_updates(
+        stream,
+        request_id,
+        task_id,
+        target_id,
+        input,
+        paths,
+        hermes_client,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_cli_hermes_run(
+    stream: &mut UnixStream,
+    request_id: String,
+    task_id: String,
+    target_id: String,
+    input: String,
+    connector: &ConnectorKind,
+    paths: &AgentFerryPaths,
+    hermes_client: &HermesClient,
+) -> io::Result<()> {
+    if *connector != ConnectorKind::Cli {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(
+                request_id,
+                ErrorCode::PermissionDenied,
+                "只有 CLI Connector 可以直接提交 Hermes Run",
+                false,
+            ),
+        )
+        .await;
+    }
+    if !safe_identifier(&task_id) || !safe_identifier(&target_id) {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(
+                request_id,
+                ErrorCode::InvalidMessage,
+                "task_id 与 target_id 必须是安全标识符",
+                false,
+            ),
+        )
+        .await;
+    }
+    if input.trim().is_empty() || input.len() > MAX_HERMES_RUN_INPUT_BYTES {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(
+                request_id,
+                ErrorCode::MessageTooLarge,
+                "Hermes Run input 不能为空且不得超过 512 KiB",
+                false,
+            ),
+        )
+        .await;
+    }
+    stream_hermes_updates(
+        stream,
+        request_id,
+        task_id,
+        target_id,
+        input,
+        paths,
+        hermes_client,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn stream_hermes_updates(
+    stream: &mut UnixStream,
+    request_id: String,
+    task_id: String,
+    target_id: String,
+    input: String,
+    paths: &AgentFerryPaths,
+    hermes_client: &HermesClient,
+) -> io::Result<()> {
     let connections = match load_connections(&paths.hermes_connections) {
         Ok(connections) => connections,
         Err(error) => {
@@ -818,25 +918,38 @@ async fn stream_handoff(
         )
         .await;
     };
-    let Some(token) = KeychainCredentialStore
-        .get(&connection.credential_ref)
-        .map_err(io::Error::other)?
-    else {
-        return write_async_json(
-            stream,
-            &HostResponse::failure(
-                request_id,
-                ErrorCode::PermissionDenied,
-                "目标 Hermes 的 Keychain 凭据不存在",
-                false,
-            ),
-        )
-        .await;
+    let token = match KeychainCredentialStore.get(&connection.credential_ref) {
+        Ok(Some(token)) => token,
+        Ok(None) => {
+            return write_async_json(
+                stream,
+                &HostResponse::failure(
+                    request_id,
+                    ErrorCode::PermissionDenied,
+                    "目标 Hermes 的 Keychain 凭据不存在",
+                    false,
+                ),
+            )
+            .await;
+        }
+        Err(error) => {
+            return write_async_json(
+                stream,
+                &HostResponse::failure(request_id, ErrorCode::Internal, error.to_string(), false),
+            )
+            .await;
+        }
     };
-    let diagnosis = hermes_client
-        .diagnose(&connection, &token)
-        .await
-        .map_err(io::Error::other)?;
+    let diagnosis = match hermes_client.diagnose(&connection, &token).await {
+        Ok(diagnosis) => diagnosis,
+        Err(error) => {
+            return write_async_json(
+                stream,
+                &HostResponse::failure(request_id, ErrorCode::Internal, error.to_string(), false),
+            )
+            .await;
+        }
+    };
     if diagnosis.state != DiagnosisState::Ready {
         return write_async_json(
             stream,
@@ -855,6 +968,7 @@ async fn stream_handoff(
         .any(|capability| capability == "run.events_sse");
     let mut updates = hermes_client.run(connection, token, input, use_sse);
     let mut sequence = 0_u64;
+    let mut reached_terminal = false;
     while let Some(update) = updates.recv().await {
         info!(
             task_id,
@@ -862,6 +976,12 @@ async fn stream_handoff(
             sequence,
             event = ?update.kind,
             "转发 Hermes Run 事件"
+        );
+        reached_terminal = matches!(
+            update.kind,
+            agent_ferry_protocol::HandoffEventKind::Completed
+                | agent_ferry_protocol::HandoffEventKind::Failed
+                | agent_ferry_protocol::HandoffEventKind::Cancelled
         );
         let event = HandoffEvent {
             protocol_version: PROTOCOL_VERSION,
@@ -873,11 +993,26 @@ async fn stream_handoff(
             text: update.text,
         };
         if write_async_json(stream, &event).await.is_err() {
-            // 弹窗关闭只中断本地观察；Hermes Run 已经由远端托管，不执行 stop。
-            info!(task_id, "浏览器观察者已离开，远端 Run 继续执行");
+            // 观察端离开只中断本地输出；Hermes Run 已经由远端托管，不能据此误取消长时任务。
+            info!(task_id, "本地观察者已离开，远端 Run 继续执行");
             break;
         }
         sequence = sequence.saturating_add(1);
+        if reached_terminal {
+            return Ok(());
+        }
+    }
+    if !reached_terminal {
+        let event = HandoffEvent {
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            task_id,
+            sequence,
+            event: agent_ferry_protocol::HandoffEventKind::Failed,
+            run_id: None,
+            text: Some("Hermes Run 事件流未返回终态".to_owned()),
+        };
+        let _ = write_async_json(stream, &event).await;
     }
     Ok(())
 }

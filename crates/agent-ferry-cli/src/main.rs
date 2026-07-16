@@ -4,12 +4,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use agent_ferry_core::{
-    AgentFerryPaths, NativeHostManifest, read_native_host_manifest, send_ipc_request,
+    AgentFerryPaths, NativeHostManifest, open_ipc_stream, read_native_host_manifest,
+    send_ipc_request,
 };
 use agent_ferry_hermes::{ConnectionDiagnosis, DiagnosisState, load_connections};
 use agent_ferry_protocol::{
-    Command, ConnectionTransportConfig, ConnectorKind, HandoffTargetState, HandoffTargetStatus,
-    HostRequest, PROTOCOL_VERSION, ResponseOutcome, ServiceState, StatusResult,
+    Command, ConnectionTransportConfig, ConnectorKind, FrameError, HandoffEvent, HandoffEventKind,
+    HandoffTargetState, HandoffTargetStatus, HostRequest, HostResponse, MAX_HERMES_RUN_INPUT_BYTES,
+    PROTOCOL_VERSION, ResponseOutcome, ServiceState, StatusResult, read_json_frame,
 };
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
@@ -80,6 +82,17 @@ enum ConnectionCommand {
         identifier: Option<String>,
         #[command(flatten)]
         output: OutputArgs,
+    },
+    /// 不经过浏览器，直接提交一个 Hermes Run 并观察到终态
+    Run {
+        /// Connection ID 或名称
+        identifier: String,
+        /// 从文件读取完整 input
+        #[arg(long, conflicts_with = "input_stdin")]
+        input_file: Option<PathBuf>,
+        /// 从 stdin 读取完整 input
+        #[arg(long, conflicts_with = "input_file")]
+        input_stdin: bool,
     },
     /// 删除 Connection 及其 Keychain 凭据
     Remove {
@@ -348,6 +361,11 @@ fn run_connection_command(command: ConnectionCommand) -> Result<i32, CliError> {
                         .any(|diagnosis| diagnosis.state != DiagnosisState::Ready),
             ))
         }
+        ConnectionCommand::Run {
+            identifier,
+            input_file,
+            input_stdin,
+        } => run_hermes_input(&paths, &identifier, input_file.as_deref(), input_stdin),
         ConnectionCommand::Remove { identifier } => {
             send_daemon_command(
                 &paths,
@@ -357,6 +375,115 @@ fn run_connection_command(command: ConnectionCommand) -> Result<i32, CliError> {
             )?;
             println!("已删除 Hermes Connection: {identifier}");
             Ok(0)
+        }
+    }
+}
+
+fn run_hermes_input(
+    paths: &AgentFerryPaths,
+    identifier: &str,
+    input_file: Option<&Path>,
+    input_stdin: bool,
+) -> Result<i32, CliError> {
+    if input_file.is_none() && !input_stdin {
+        return Err(CliError::RunInputRequired);
+    }
+    let input = if let Some(path) = input_file {
+        read_limited_input(fs::File::open(path)?)?
+    } else {
+        read_limited_input(io::stdin().lock())?
+    };
+    let connections = load_connections(&paths.hermes_connections)?;
+    let connection = connections
+        .connections
+        .into_iter()
+        .find(|connection| connection.id == identifier || connection.name == identifier)
+        .ok_or_else(|| CliError::ConnectionNotFound(identifier.to_owned()))?;
+    let task_id = format!("cli-{}", Uuid::new_v4().simple());
+    let request = HostRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: Uuid::new_v4().to_string(),
+        command: Command::HermesRun {
+            task_id,
+            target_id: connection.id,
+            input,
+        },
+    };
+    let mut stream = open_ipc_stream(paths, ConnectorKind::Cli, serde_json::to_value(request)?)?;
+    observe_hermes_run(&mut stream)
+}
+
+fn read_limited_input(reader: impl Read) -> Result<String, CliError> {
+    let mut bytes = Vec::new();
+    reader
+        .take(u64::try_from(MAX_HERMES_RUN_INPUT_BYTES).unwrap_or(u64::MAX) + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_HERMES_RUN_INPUT_BYTES {
+        return Err(CliError::RunInputTooLarge);
+    }
+    let input = String::from_utf8(bytes).map_err(|_| CliError::RunInputNotUtf8)?;
+    if input.trim().is_empty() {
+        return Err(CliError::RunInputEmpty);
+    }
+    Ok(input)
+}
+
+fn observe_hermes_run(stream: &mut std::os::unix::net::UnixStream) -> Result<i32, CliError> {
+    loop {
+        let value: serde_json::Value = match read_json_frame(stream) {
+            Ok(value) => value,
+            Err(FrameError::EndOfStream) => return Err(CliError::RunEndedBeforeTerminal),
+            Err(error) => return Err(error.into()),
+        };
+        if value.get("event").is_none() {
+            let response: HostResponse = serde_json::from_value(value)?;
+            return match response.outcome {
+                ResponseOutcome::Success { .. } => Err(CliError::RunEndedBeforeTerminal),
+                ResponseOutcome::Failure { error } => Err(CliError::DaemonRejected(error.message)),
+            };
+        }
+        let event: HandoffEvent = serde_json::from_value(value)?;
+        match event.event {
+            HandoffEventKind::Submitted => {
+                println!(
+                    "Hermes Run 已提交: {}",
+                    event.run_id.as_deref().unwrap_or("等待 run_id")
+                );
+            }
+            HandoffEventKind::Running => println!("Hermes Run 执行中"),
+            HandoffEventKind::OutputDelta => {
+                if let Some(text) = event.text {
+                    println!("[output] {text}");
+                }
+            }
+            HandoffEventKind::ToolStarted => {
+                println!(
+                    "[tool:start] {}",
+                    event.text.as_deref().unwrap_or("unknown")
+                );
+            }
+            HandoffEventKind::ToolCompleted => {
+                println!("[tool:done] {}", event.text.as_deref().unwrap_or("unknown"));
+            }
+            HandoffEventKind::Completed => {
+                if let Some(text) = event.text {
+                    println!("[result] {text}");
+                }
+                println!("Hermes Run 已完成");
+                return Ok(0);
+            }
+            HandoffEventKind::Failed => {
+                if let Some(text) = event.text {
+                    eprintln!("Hermes Run 失败: {text}");
+                } else {
+                    eprintln!("Hermes Run 失败");
+                }
+                return Ok(1);
+            }
+            HandoffEventKind::Cancelled => {
+                eprintln!("Hermes Run 已取消");
+                return Ok(2);
+            }
         }
     }
 }
@@ -759,6 +886,8 @@ enum CliError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
+    Frame(#[from] FrameError),
+    #[error(transparent)]
     Hermes(#[from] agent_ferry_hermes::HermesError),
     #[error("Chrome extension id 必须是 32 个 a-p 小写字符")]
     InvalidExtensionId,
@@ -772,6 +901,16 @@ enum CliError {
     TokenNotUtf8,
     #[error("Hermes Bearer Token 超过 16 KiB 上限")]
     TokenTooLarge,
+    #[error("请使用 --input-file 或 --input-stdin 提供 Hermes Run input")]
+    RunInputRequired,
+    #[error("Hermes Run input 不能为空")]
+    RunInputEmpty,
+    #[error("Hermes Run input 必须是 UTF-8")]
+    RunInputNotUtf8,
+    #[error("Hermes Run input 超过 512 KiB 上限")]
+    RunInputTooLarge,
+    #[error("Hermes Run 连接在终态前结束")]
+    RunEndedBeforeTerminal,
     #[error("未找到 Hermes Connection: {0}")]
     ConnectionNotFound(String),
     #[error("Hermes Connection 已存在: {0}；请先运行 connection doctor 或 remove")]

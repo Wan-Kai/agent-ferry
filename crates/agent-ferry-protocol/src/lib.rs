@@ -9,6 +9,7 @@ pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 pub const MAX_HANDOFF_CHUNK_BYTES: usize = 192 * 1024;
 pub const MAX_HANDOFF_CONTENT_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_HANDOFF_CHUNKS: u32 = 43;
+pub const MAX_HERMES_RUN_INPUT_BYTES: usize = 512 * 1024;
 pub const NATIVE_HOST_NAME: &str = "com.agentferry.host";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +58,11 @@ pub enum Command {
     ConnectionRemove {
         identifier: String,
     },
+    HermesRun {
+        task_id: String,
+        target_id: String,
+        input: String,
+    },
     Handoff {
         task_id: String,
         target_id: String,
@@ -104,6 +110,16 @@ impl std::fmt::Debug for Command {
             Self::ConnectionRemove { identifier } => formatter
                 .debug_struct("ConnectionRemove")
                 .field("identifier", identifier)
+                .finish(),
+            Self::HermesRun {
+                task_id,
+                target_id,
+                input: _,
+            } => formatter
+                .debug_struct("HermesRun")
+                .field("task_id", task_id)
+                .field("target_id", target_id)
+                .field("input", &"[REDACTED]")
                 .finish(),
             Self::Handoff {
                 task_id,
@@ -159,6 +175,7 @@ impl Command {
             Self::Status => "status",
             Self::ConnectionAdd { .. } => "connection_add",
             Self::ConnectionRemove { .. } => "connection_remove",
+            Self::HermesRun { .. } => "hermes_run",
             Self::Handoff { .. } => "handoff",
             Self::HandoffBegin { .. } => "handoff_begin",
             Self::HandoffChunk { .. } => "handoff_chunk",
@@ -509,6 +526,18 @@ mod tests {
         };
         let rendered = format!("{command:?}");
         assert!(!rendered.contains("must-stay-private-page-content"));
+        assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn hermes_run_debug_never_exposes_input() {
+        let command = Command::HermesRun {
+            task_id: "task-1".to_owned(),
+            target_id: "remote-1".to_owned(),
+            input: "must-stay-private-run-input".to_owned(),
+        };
+        let rendered = format!("{command:?}");
+        assert!(!rendered.contains("must-stay-private-run-input"));
         assert!(rendered.contains("[REDACTED]"));
     }
 
