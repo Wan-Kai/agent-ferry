@@ -6,6 +6,7 @@ members = [
     "crates/agent-ferry-host",
     "crates/agent-ferry-hermes",
     "crates/agent-ferry-protocol",
+    "crates/agent-ferry-transport",
 ]
 resolver = "3"
 
@@ -23,7 +24,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 security-framework = "3"
 sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }

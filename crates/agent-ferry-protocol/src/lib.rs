@@ -32,6 +32,16 @@ pub struct HostRequest {
     pub command: Command,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ConnectionTransportConfig {
+    #[default]
+    Direct,
+    SshTunnel {
+        ssh_host: String,
+    },
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
@@ -40,6 +50,8 @@ pub enum Command {
         name: String,
         base_url: String,
         model: Option<String>,
+        #[serde(default)]
+        transport: ConnectionTransportConfig,
         token: String,
     },
     ConnectionRemove {
@@ -79,12 +91,14 @@ impl std::fmt::Debug for Command {
                 name,
                 base_url,
                 model,
+                transport,
                 token: _,
             } => formatter
                 .debug_struct("ConnectionAdd")
                 .field("name", name)
                 .field("base_url", base_url)
                 .field("model", model)
+                .field("transport", transport)
                 .field("token", &"[REDACTED]")
                 .finish(),
             Self::ConnectionRemove { identifier } => formatter
@@ -454,12 +468,36 @@ mod tests {
             name: "remote".to_owned(),
             base_url: "https://hermes.example".to_owned(),
             model: None,
+            transport: ConnectionTransportConfig::Direct,
             token: "must-stay-secret".to_owned(),
         };
 
         let rendered = format!("{command:?}");
         assert!(!rendered.contains("must-stay-secret"));
         assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn legacy_connection_add_defaults_to_direct_transport() {
+        let request: HostRequest = serde_json::from_value(serde_json::json!({
+            "protocol_version": PROTOCOL_VERSION,
+            "request_id": "legacy",
+            "command": {
+                "type": "connection_add",
+                "name": "remote",
+                "base_url": "http://127.0.0.1:8642",
+                "model": null,
+                "token": "secret"
+            }
+        }))
+        .expect("解析旧版 ConnectionAdd");
+        assert!(matches!(
+            request.command,
+            Command::ConnectionAdd {
+                transport: ConnectionTransportConfig::Direct,
+                ..
+            }
+        ));
     }
 
     #[test]

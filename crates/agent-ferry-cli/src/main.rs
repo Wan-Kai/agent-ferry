@@ -8,8 +8,8 @@ use agent_ferry_core::{
 };
 use agent_ferry_hermes::{ConnectionDiagnosis, DiagnosisState, load_connections};
 use agent_ferry_protocol::{
-    Command, ConnectorKind, HandoffTargetState, HandoffTargetStatus, HostRequest, PROTOCOL_VERSION,
-    ResponseOutcome, ServiceState, StatusResult,
+    Command, ConnectionTransportConfig, ConnectorKind, HandoffTargetState, HandoffTargetStatus,
+    HostRequest, PROTOCOL_VERSION, ResponseOutcome, ServiceState, StatusResult,
 };
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
@@ -83,7 +83,7 @@ enum ConnectionCommand {
 
 #[derive(Debug, Subcommand)]
 enum ConnectionKind {
-    /// 通过 Direct URL 连接用户已有的 Hermes API Server
+    /// 连接用户已有的 Hermes API Server；默认 Direct，可显式选择 SSH Tunnel
     Hermes {
         #[arg(long)]
         name: String,
@@ -92,6 +92,9 @@ enum ConnectionKind {
         url: String,
         #[arg(long)]
         model: Option<String>,
+        /// 通过该 ~/.ssh/config host 建立 Tunnel；省略时使用 Direct
+        #[arg(long)]
+        ssh_host: Option<String>,
         /// 从 stdin 读取 Bearer Token，避免进入 shell history 和进程列表
         #[arg(long)]
         token_stdin: bool,
@@ -120,6 +123,8 @@ struct ConnectionListItem {
     name: String,
     kind: &'static str,
     transport: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssh_host: Option<String>,
     endpoint: String,
     model: Option<String>,
 }
@@ -251,6 +256,7 @@ fn run_connection_command(command: ConnectionCommand) -> Result<i32, CliError> {
                     name,
                     url,
                     model,
+                    ssh_host,
                     token_stdin,
                 },
         } => {
@@ -265,6 +271,9 @@ fn run_connection_command(command: ConnectionCommand) -> Result<i32, CliError> {
                     name: name.clone(),
                     base_url: url,
                     model,
+                    transport: ssh_host.map_or(ConnectionTransportConfig::Direct, |ssh_host| {
+                        ConnectionTransportConfig::SshTunnel { ssh_host }
+                    }),
                     token,
                 },
             )?;
@@ -276,30 +285,7 @@ fn run_connection_command(command: ConnectionCommand) -> Result<i32, CliError> {
             println!("已添加 Hermes Connection: {name} ({id})");
             Ok(0)
         }
-        ConnectionCommand::List(output) => {
-            let connections = load_connections(&paths.hermes_connections)?;
-            let mut items = Vec::with_capacity(connections.connections.len());
-            for connection in connections.connections {
-                items.push(ConnectionListItem {
-                    id: connection.id,
-                    name: connection.name,
-                    kind: "remote_hermes",
-                    transport: "direct",
-                    endpoint: connection.endpoint.base_url.to_string(),
-                    model: connection.endpoint.model,
-                });
-            }
-            if output.json {
-                println!("{}", serde_json::to_string_pretty(&items)?);
-            } else if items.is_empty() {
-                println!("尚未配置 Hermes Connection");
-            } else {
-                for item in items {
-                    println!("{}  {}  {}", item.id, item.name, item.endpoint);
-                }
-            }
-            Ok(0)
-        }
+        ConnectionCommand::List(output) => list_connections(&paths, &output),
         ConnectionCommand::Doctor { identifier, output } => {
             let result = send_daemon_command(&paths, Command::Status)?;
             let diagnoses = diagnoses_from_targets(&paths, identifier.as_deref(), &result.targets)?;
@@ -339,6 +325,42 @@ fn run_connection_command(command: ConnectionCommand) -> Result<i32, CliError> {
             Ok(0)
         }
     }
+}
+
+fn list_connections(paths: &AgentFerryPaths, output: &OutputArgs) -> Result<i32, CliError> {
+    let connections = load_connections(&paths.hermes_connections)?;
+    let mut items = Vec::with_capacity(connections.connections.len());
+    for connection in connections.connections {
+        let (transport, ssh_host) = match connection.transport {
+            agent_ferry_hermes::HermesTransport::Direct => ("direct", None),
+            agent_ferry_hermes::HermesTransport::SshTunnel { ssh_host } => {
+                ("ssh_tunnel", Some(ssh_host))
+            }
+        };
+        items.push(ConnectionListItem {
+            id: connection.id,
+            name: connection.name,
+            kind: "remote_hermes",
+            transport,
+            ssh_host,
+            endpoint: connection.endpoint.base_url.to_string(),
+            model: connection.endpoint.model,
+        });
+    }
+    if output.json {
+        println!("{}", serde_json::to_string_pretty(&items)?);
+    } else if items.is_empty() {
+        println!("尚未配置 Hermes Connection");
+    } else {
+        for item in items {
+            let route = item.ssh_host.map_or_else(
+                || item.transport.to_owned(),
+                |ssh_host| format!("{}:{ssh_host}", item.transport),
+            );
+            println!("{}  {}  {}  {}", item.id, item.name, route, item.endpoint);
+        }
+    }
+    Ok(0)
 }
 
 fn read_token_from_stdin() -> Result<Vec<u8>, CliError> {

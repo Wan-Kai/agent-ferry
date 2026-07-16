@@ -14,11 +14,11 @@ use agent_ferry_hermes::{
     add_connection, load_connections, remove_connection,
 };
 use agent_ferry_protocol::{
-    Command, ConnectorKind, ErrorCode, HandoffEvent, HandoffTargetKind, HandoffTargetState,
-    HandoffTargetStatus, HandoffTransferAck, HandoffTransferPhase, HostRequest, HostResponse,
-    IpcEnvelope, MAX_HANDOFF_CHUNK_BYTES, MAX_HANDOFF_CHUNKS, MAX_HANDOFF_CONTENT_BYTES,
-    MAX_MESSAGE_BYTES, PROTOCOL_VERSION, ServiceState, SourceDocument, SourceMetadata,
-    StatusResult,
+    Command, ConnectionTransportConfig, ConnectorKind, ErrorCode, HandoffEvent, HandoffTargetKind,
+    HandoffTargetState, HandoffTargetStatus, HandoffTransferAck, HandoffTransferPhase, HostRequest,
+    HostResponse, IpcEnvelope, MAX_HANDOFF_CHUNK_BYTES, MAX_HANDOFF_CHUNKS,
+    MAX_HANDOFF_CONTENT_BYTES, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, ServiceState, SourceDocument,
+    SourceMetadata, StatusResult,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -348,6 +348,7 @@ async fn dispatch_request(
             name,
             base_url,
             model,
+            transport,
             token,
         } => {
             if *connector != ConnectorKind::Cli {
@@ -358,15 +359,22 @@ async fn dispatch_request(
                     false,
                 );
             }
-            let operation =
-                HermesConnection::direct(&name, &base_url, model).and_then(|connection| {
-                    add_connection(
-                        paths,
-                        &KeychainCredentialStore,
-                        connection,
-                        token.as_bytes(),
-                    )
-                });
+            let operation = match transport {
+                ConnectionTransportConfig::Direct => {
+                    HermesConnection::direct(&name, &base_url, model)
+                }
+                ConnectionTransportConfig::SshTunnel { ssh_host } => {
+                    HermesConnection::ssh_tunnel(&name, &base_url, model, &ssh_host)
+                }
+            }
+            .and_then(|connection| {
+                add_connection(
+                    paths,
+                    &KeychainCredentialStore,
+                    connection,
+                    token.as_bytes(),
+                )
+            });
             if let Err(error) = operation {
                 return HostResponse::failure(
                     request.request_id,

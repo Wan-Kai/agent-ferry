@@ -1,11 +1,12 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_ferry_core::AgentFerryPaths;
 use agent_ferry_protocol::HandoffEventKind;
+use agent_ferry_transport::{SshTunnel, SshTunnelTransport, valid_ssh_host};
 use futures_util::StreamExt as _;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -34,10 +35,11 @@ pub struct HermesEndpoint {
     pub model: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HermesTransport {
     Direct,
+    SshTunnel { ssh_host: String },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +99,41 @@ impl HermesConnection {
     ///
     /// 名称、URL 或可选 model 不符合持久配置约束时返回错误。
     pub fn direct(name: &str, base_url: &str, model: Option<String>) -> Result<Self, HermesError> {
+        Self::new(name, base_url, model, HermesTransport::Direct)
+    }
+
+    /// 构建复用用户 OpenSSH 配置的 Tunnel Connection。
+    ///
+    /// # Errors
+    ///
+    /// SSH host、名称、URL 或可选 model 不符合持久配置约束时返回错误。
+    pub fn ssh_tunnel(
+        name: &str,
+        base_url: &str,
+        model: Option<String>,
+        ssh_host: &str,
+    ) -> Result<Self, HermesError> {
+        let ssh_host = ssh_host.trim();
+        // 参数直接传给 ssh 而不经过 shell；仍拒绝 option 形态和空白，避免配置含义不明确。
+        if !valid_ssh_host(ssh_host) {
+            return Err(HermesError::InvalidSshHost);
+        }
+        Self::new(
+            name,
+            base_url,
+            model,
+            HermesTransport::SshTunnel {
+                ssh_host: ssh_host.to_owned(),
+            },
+        )
+    }
+
+    fn new(
+        name: &str,
+        base_url: &str,
+        model: Option<String>,
+        transport: HermesTransport,
+    ) -> Result<Self, HermesError> {
         let name = name.trim();
         if name.is_empty() {
             return Err(HermesError::InvalidName);
@@ -118,6 +155,10 @@ impl HermesConnection {
         {
             return Err(HermesError::UnsafeUrl);
         }
+        if matches!(&transport, HermesTransport::SshTunnel { .. }) && base_url.scheme() != "http" {
+            // Tunnel 本地端改写为 127.0.0.1；HTTPS 证书通常不包含该地址，首版不允许悄悄降低 TLS 校验。
+            return Err(HermesError::SshHttpsUnsupported);
+        }
         let normalized_path = base_url.path().trim_end_matches('/').to_owned();
         base_url.set_path(if normalized_path.is_empty() {
             "/"
@@ -131,7 +172,7 @@ impl HermesConnection {
             id,
             name: name.to_owned(),
             endpoint: HermesEndpoint { base_url, model },
-            transport: HermesTransport::Direct,
+            transport,
         })
     }
 
@@ -243,6 +284,14 @@ pub fn load_connections(path: &Path) -> Result<HermesConnections, HermesError> {
             return Err(HermesError::DuplicateConnection(connection.name.clone()));
         }
         connection.credential_account()?;
+        if let HermesTransport::SshTunnel { ssh_host } = &connection.transport {
+            if !valid_ssh_host(ssh_host) {
+                return Err(HermesError::InvalidSshHost);
+            }
+            if connection.endpoint.base_url.scheme() != "http" {
+                return Err(HermesError::SshHttpsUnsupported);
+            }
+        }
     }
     Ok(connections)
 }
@@ -327,7 +376,14 @@ pub fn remove_connection<S: CredentialStore>(
 #[derive(Debug, Clone)]
 pub struct HermesClient {
     client: Client,
+    tunnel_client: Client,
     request_timeout: Duration,
+    ssh_transport: SshTunnelTransport,
+}
+
+struct ActiveConnection {
+    connection: HermesConnection,
+    _tunnel: Option<SshTunnel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -351,9 +407,76 @@ impl HermesClient {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(HermesError::HttpClient)?;
+        // Tunnel 的本地 loopback 请求不得继承 HTTP_PROXY，否则 Bearer Token 可能被送往代理。
+        let tunnel_client = Client::builder()
+            .connect_timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .map_err(HermesError::HttpClient)?;
         Ok(Self {
             client,
+            tunnel_client,
             request_timeout: timeout,
+            ssh_transport: SshTunnelTransport::system(timeout),
+        })
+    }
+
+    /// 覆盖系统 SSH 路径，供受控安装环境与端到端测试使用。
+    #[must_use]
+    pub fn with_ssh_program(mut self, program: impl Into<PathBuf>) -> Self {
+        self.ssh_transport = self.ssh_transport.with_program(program);
+        self
+    }
+
+    fn request_client(&self, connection: &HermesConnection) -> &Client {
+        if matches!(&connection.transport, HermesTransport::SshTunnel { .. }) {
+            &self.tunnel_client
+        } else {
+            &self.client
+        }
+    }
+
+    async fn activate(
+        &self,
+        connection: &HermesConnection,
+    ) -> Result<ActiveConnection, HermesError> {
+        let HermesTransport::SshTunnel { ssh_host } = &connection.transport else {
+            return Ok(ActiveConnection {
+                connection: connection.clone(),
+                _tunnel: None,
+            });
+        };
+        let remote_host = connection
+            .endpoint
+            .base_url
+            .host_str()
+            .ok_or(HermesError::UnsafeUrl)?;
+        let remote_port = connection
+            .endpoint
+            .base_url
+            .port_or_known_default()
+            .ok_or(HermesError::UnsafeUrl)?;
+        let tunnel = self
+            .ssh_transport
+            .open(ssh_host, remote_host, remote_port)
+            .await?;
+        let local_port = tunnel.local_port();
+
+        let mut local = connection.clone();
+        local
+            .endpoint
+            .base_url
+            .set_host(Some("127.0.0.1"))
+            .map_err(|_| HermesError::UnsafeUrl)?;
+        local
+            .endpoint
+            .base_url
+            .set_port(Some(local_port))
+            .map_err(|()| HermesError::UnsafeUrl)?;
+        Ok(ActiveConnection {
+            connection: local,
+            _tunnel: Some(tunnel),
         })
     }
 
@@ -368,9 +491,21 @@ impl HermesClient {
         token: &[u8],
     ) -> Result<ConnectionDiagnosis, HermesError> {
         let token = std::str::from_utf8(token).map_err(|_| HermesError::CredentialNotUtf8)?;
+        let active = match self.activate(connection).await {
+            Ok(active) => active,
+            Err(error) => {
+                return Ok(diagnosis(
+                    connection,
+                    DiagnosisState::ConnectionFailed,
+                    error.to_string(),
+                    Vec::new(),
+                ));
+            }
+        };
+        let request_connection = &active.connection;
         let response = self
-            .client
-            .get(connection.capabilities_url()?)
+            .request_client(request_connection)
+            .get(request_connection.capabilities_url()?)
             .bearer_auth(token)
             .timeout(self.request_timeout)
             .send()
@@ -378,10 +513,15 @@ impl HermesClient {
         let response = match response {
             Ok(response) => response,
             Err(error) => {
+                let detail = if matches!(&connection.transport, HermesTransport::SshTunnel { .. }) {
+                    format!("SSH Tunnel 已建立，但远端 Hermes 不可达: {error}")
+                } else {
+                    format!("无法连接 Hermes: {error}")
+                };
                 return Ok(diagnosis(
                     connection,
                     DiagnosisState::ConnectionFailed,
-                    format!("无法连接 Hermes: {error}"),
+                    detail,
                     Vec::new(),
                 ));
             }
@@ -505,19 +645,21 @@ impl HermesClient {
         sender: &mpsc::Sender<HermesRunUpdate>,
     ) -> Result<(), HermesError> {
         let token = std::str::from_utf8(token).map_err(|_| HermesError::CredentialNotUtf8)?;
+        let active = self.activate(connection).await?;
+        let connection = &active.connection;
         let mut body = serde_json::json!({ "input": input });
         if let Some(model) = &connection.endpoint.model {
             body["model"] = Value::String(model.clone());
         }
         let response = self
-            .client
+            .request_client(connection)
             .post(connection.api_url("/v1/runs")?)
             .bearer_auth(token)
             .timeout(self.request_timeout)
             .json(&body)
             .send()
             .await
-            .map_err(HermesError::RunTransport)?;
+            .map_err(|error| run_transport_error(connection, error))?;
         if response.status() == StatusCode::PAYLOAD_TOO_LARGE {
             return Err(HermesError::RunInputTooLarge);
         }
@@ -553,19 +695,20 @@ impl HermesClient {
         sender: &mpsc::Sender<HermesRunUpdate>,
     ) -> Result<(), HermesError> {
         let response = self
-            .client
+            .request_client(connection)
             .get(connection.api_url(&format!("/v1/runs/{run_id}/events"))?)
             .bearer_auth(token)
             .send()
             .await
-            .map_err(HermesError::RunTransport)?;
+            .map_err(|error| run_transport_error(connection, error))?;
         if !response.status().is_success() {
             return Err(HermesError::RunHttp(response.status().as_u16()));
         }
         let mut bytes = response.bytes_stream();
         let mut buffer = Vec::new();
         while let Some(chunk) = bytes.next().await {
-            buffer.extend_from_slice(&chunk.map_err(HermesError::RunTransport)?);
+            buffer
+                .extend_from_slice(&chunk.map_err(|error| run_transport_error(connection, error))?);
             if buffer.len() > 256 * 1024 {
                 return Err(HermesError::RunEventTooLarge);
             }
@@ -607,13 +750,13 @@ impl HermesClient {
     ) -> Result<(), HermesError> {
         loop {
             let response = self
-                .client
+                .request_client(connection)
                 .get(connection.api_url(&format!("/v1/runs/{run_id}"))?)
                 .bearer_auth(token)
                 .timeout(self.request_timeout)
                 .send()
                 .await
-                .map_err(HermesError::RunTransport)?;
+                .map_err(|error| run_transport_error(connection, error))?;
             if !response.status().is_success() {
                 return Err(HermesError::RunHttp(response.status().as_u16()));
             }
@@ -700,6 +843,14 @@ fn diagnosis(
     }
 }
 
+fn run_transport_error(connection: &HermesConnection, error: reqwest::Error) -> HermesError {
+    if matches!(&connection.transport, HermesTransport::SshTunnel { .. }) {
+        HermesError::SshRunTransport(error)
+    } else {
+        HermesError::RunTransport(error)
+    }
+}
+
 fn capability_names(features: &HermesFeatures) -> Vec<String> {
     let mut capabilities = Vec::new();
     if features.run_submission {
@@ -730,6 +881,12 @@ pub enum HermesError {
     InvalidUrl(url::ParseError),
     #[error("Hermes URL 必须是无内嵌凭据、query 或 fragment 的 http(s) 地址")]
     UnsafeUrl,
+    #[error("SSH host 必须是 ~/.ssh/config 中的单一 host、hostname 或 user@host，且不能以 - 开头")]
+    InvalidSshHost,
+    #[error("SSH Tunnel 首版只接受 HTTP URL，避免本地端改写主机名后绕过 HTTPS 证书校验")]
+    SshHttpsUnsupported,
+    #[error(transparent)]
+    SshTunnel(#[from] agent_ferry_transport::SshTunnelError),
     #[error("Hermes credential reference 无效")]
     InvalidCredentialReference,
     #[error("Hermes Bearer Token 不能为空")]
@@ -746,6 +903,8 @@ pub enum HermesError {
     HttpClient(reqwest::Error),
     #[error("Hermes Run 网络请求失败: {0}")]
     RunTransport(reqwest::Error),
+    #[error("SSH Tunnel 在 Hermes Run 期间断开或远端不可达: {0}")]
+    SshRunTransport(reqwest::Error),
     #[error("Hermes Run API 返回 HTTP {0}")]
     RunHttp(u16),
     #[error("Hermes 拒绝 Run input（HTTP 413）：正文超过该服务器允许的请求大小")]
@@ -776,6 +935,54 @@ mod tests {
             HermesConnection::direct("server", "https://example.com?token=secret", None),
             Err(HermesError::UnsafeUrl)
         ));
+    }
+
+    #[test]
+    fn ssh_transport_is_explicit_and_keeps_private_keys_out_of_config() {
+        let connection =
+            HermesConnection::ssh_tunnel("server", "http://127.0.0.1:8642", None, "hermes-prod")
+                .expect("创建 SSH Tunnel Connection");
+        let json = serde_json::to_string(&connection).expect("序列化 Connection");
+        assert!(json.contains(r#""ssh_tunnel":{"ssh_host":"hermes-prod"}"#));
+        assert!(!json.contains("IdentityFile"));
+        assert!(!json.contains("PRIVATE KEY"));
+
+        assert!(matches!(
+            HermesConnection::ssh_tunnel("bad", "http://127.0.0.1:8642", None, "-oProxyCommand=x"),
+            Err(HermesError::InvalidSshHost)
+        ));
+        assert!(matches!(
+            HermesConnection::ssh_tunnel("tls", "https://hermes.internal", None, "hermes-prod"),
+            Err(HermesError::SshHttpsUnsupported)
+        ));
+    }
+
+    #[tokio::test]
+    async fn ssh_authentication_failure_keeps_openssh_diagnostic() {
+        let script = std::env::temp_dir().join(format!("aferry-fake-ssh-{}", Uuid::new_v4()));
+        fs::write(
+            &script,
+            "#!/bin/sh\necho 'Permission denied (publickey).' >&2\nexit 255\n",
+        )
+        .expect("写入假 SSH");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("设置假 SSH 权限");
+        let client = HermesClient::new(Duration::from_secs(1))
+            .expect("创建 client")
+            .with_ssh_program(&script);
+        let connection = HermesConnection::ssh_tunnel(
+            "auth-failure",
+            "http://127.0.0.1:8642",
+            None,
+            "unreachable",
+        )
+        .expect("创建 Connection");
+        let diagnosis = client
+            .diagnose(&connection, b"token")
+            .await
+            .expect("SSH 失败应进入诊断状态");
+        let _ = fs::remove_file(script);
+        assert_eq!(diagnosis.state, DiagnosisState::ConnectionFailed);
+        assert!(diagnosis.detail.contains("Permission denied (publickey)"));
     }
 
     #[test]
