@@ -712,7 +712,10 @@ fn source_metadata_invalid(source: &SourceMetadata) -> bool {
         || source.url.len() > 8 * 1024
         || source.title.trim().is_empty()
         || source.title.len() > 1024
-        || !matches!(source.extractor.as_str(), "defuddle" | "x-thread")
+        || !matches!(
+            source.extractor.as_str(),
+            "defuddle" | "x-thread" | "arxiv-html"
+        )
         || source.word_count < minimum_word_count(&source.extractor)
         || source.word_count > 100_000_000
         || [&source.author, &source.published, &source.site]
@@ -895,7 +898,10 @@ fn compose_handoff_input(prompt: &str, source: &SourceDocument) -> Result<String
 fn task_source_invalid(source: &SourceDocument) -> bool {
     !source_url_valid_for_extractor(&source.url, &source.extractor)
         || source.title.trim().is_empty()
-        || !matches!(source.extractor.as_str(), "defuddle" | "x-thread")
+        || !matches!(
+            source.extractor.as_str(),
+            "defuddle" | "x-thread" | "arxiv-html"
+        )
         || source.markdown.trim().len() < minimum_markdown_length(&source.extractor)
         || source.word_count < minimum_word_count(&source.extractor)
         || source.markdown.len() > MAX_HANDOFF_CONTENT_BYTES
@@ -917,6 +923,20 @@ fn source_url_valid_for_extractor(value: &str, extractor: &str) -> bool {
     if !matches!(url.scheme(), "http" | "https") {
         return false;
     }
+    if extractor == "arxiv-html" {
+        let valid_host = url.host_str().is_some_and(|host| {
+            matches!(
+                host.to_ascii_lowercase().as_str(),
+                "arxiv.org" | "www.arxiv.org"
+            )
+        });
+        let identifier = url
+            .path()
+            .strip_prefix("/html/")
+            .unwrap_or_default()
+            .trim_end_matches('/');
+        return valid_host && valid_arxiv_identifier(identifier);
+    }
     if extractor != "x-thread" {
         return extractor == "defuddle";
     }
@@ -935,6 +955,37 @@ fn source_url_valid_for_extractor(value: &str, extractor: &str) -> bool {
         && status == "status"
         && !id.is_empty()
         && id.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn valid_arxiv_identifier(identifier: &str) -> bool {
+    fn versioned_digits(value: &str, base_lengths: &[usize]) -> bool {
+        let (base, version) = value.find(['v', 'V']).map_or((value, None), |index| {
+            let (base, version) = value.split_at(index);
+            (base, Some(&version[1..]))
+        });
+        base_lengths.contains(&base.len())
+            && base.bytes().all(|byte| byte.is_ascii_digit())
+            && version.is_none_or(|version| {
+                !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit())
+            })
+    }
+
+    if let Some((year_month, sequence)) = identifier.split_once('.') {
+        if year_month.len() == 4
+            && year_month.bytes().all(|byte| byte.is_ascii_digit())
+            && versioned_digits(sequence, &[4, 5])
+        {
+            return true;
+        }
+    }
+    let Some((archive, number)) = identifier.split_once('/') else {
+        return false;
+    };
+    !archive.is_empty()
+        && archive
+            .bytes()
+            .all(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'-' | b'.'))
+        && versioned_digits(number, &[7])
 }
 
 async fn status_response(
@@ -1143,6 +1194,34 @@ mod tests {
         assert!(!source_url_valid_for_extractor(
             "https://x.com/agentferry/status/100evil",
             "x-thread"
+        ));
+    }
+
+    #[test]
+    fn arxiv_html_extractor_is_bound_to_a_valid_paper_route() {
+        assert!(source_url_valid_for_extractor(
+            "https://arxiv.org/html/2402.08954v2",
+            "arxiv-html"
+        ));
+        assert!(source_url_valid_for_extractor(
+            "https://arxiv.org/html/2402.08954V2",
+            "arxiv-html"
+        ));
+        assert!(source_url_valid_for_extractor(
+            "https://www.arxiv.org/html/hep-th/9901001v1",
+            "arxiv-html"
+        ));
+        assert!(!source_url_valid_for_extractor(
+            "https://arxiv.org/abs/2402.08954",
+            "arxiv-html"
+        ));
+        assert!(!source_url_valid_for_extractor(
+            "https://example.com/html/2402.08954",
+            "arxiv-html"
+        ));
+        assert!(!source_url_valid_for_extractor(
+            "https://arxiv.org/html/2402.08954evil",
+            "arxiv-html"
         ));
     }
 }

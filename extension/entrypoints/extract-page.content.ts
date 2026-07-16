@@ -1,5 +1,6 @@
 import Defuddle from "defuddle";
 import { MAX_HANDOFF_CONTENT_BYTES } from "../lib/handoff-transfer";
+import { extractArxivHtml, isArxivHtmlUrl } from "../lib/arxiv-html-extractor";
 import { extractXThread, extractXThreadSnapshots, isXStatusUrl } from "../lib/x-thread-extractor";
 
 export type CapturedPage = {
@@ -8,7 +9,7 @@ export type CapturedPage = {
   author: string | null;
   published: string | null;
   site: string | null;
-  extractor: "defuddle" | "x-thread";
+  extractor: "defuddle" | "x-thread" | "arxiv-html";
   markdown: string;
   word_count: number;
 };
@@ -95,6 +96,15 @@ export default defineContentScript({
     try {
       if (["x.com", "www.x.com", "twitter.com", "www.twitter.com"].includes(location.hostname.toLowerCase()) && !isXStatusUrl(location.href)) {
         throw new Error("当前 X 页面不是单条帖子或线程，请先打开具体帖子后重试");
+      }
+      if (["arxiv.org", "www.arxiv.org"].includes(location.hostname.toLowerCase()) && location.pathname.startsWith("/html/") && !isArxivHtmlUrl(location.href)) {
+        throw new Error("当前 arXiv HTML URL 不包含有效的论文标识");
+      }
+      if (isArxivHtmlUrl(location.href)) {
+        const captured = extractArxivHtml(document.cloneNode(true) as Document, location.href);
+        const byteLength = new TextEncoder().encode(captured.markdown).byteLength;
+        if (byteLength > MAX_HANDOFF_CONTENT_BYTES) throw new Error("正文超过当前版本的 8 MiB 传输上限");
+        return captured;
       }
       if (isXStatusUrl(location.href)) {
         // X 使用虚拟列表，滚动加载新回复时会卸载先前 DOM；按 permalink 合并每轮快照，
