@@ -13,6 +13,8 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod workspace;
+
 pub const HOME_ENV: &str = "AGENT_FERRY_HOME";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +24,7 @@ pub struct AgentFerryPaths {
     pub hermes_connections: PathBuf,
     pub claude_binding: PathBuf,
     pub opencode_binding: PathBuf,
+    pub workspaces: PathBuf,
     pub run_dir: PathBuf,
     pub socket: PathBuf,
     pub connector_token: PathBuf,
@@ -69,6 +72,7 @@ impl AgentFerryPaths {
             hermes_connections: config_dir.join("hermes-connections.json"),
             claude_binding: config_dir.join("claude-code.json"),
             opencode_binding: config_dir.join("opencode.json"),
+            workspaces: config_dir.join("workspaces.json"),
             config_dir,
             run_dir,
             native_host_manifest,

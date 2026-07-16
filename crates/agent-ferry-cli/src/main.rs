@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use agent_ferry_claude::{
     ClaudeDiagnosis, ClaudeDocument, ClaudeState, ClaudeTaskEvent, MAX_CLAUDE_DOCUMENT_BYTES,
 };
+use agent_ferry_core::workspace::{WorkspaceState, diagnose as diagnose_workspace};
 use agent_ferry_core::{
     AgentFerryPaths, NativeHostManifest, open_ipc_stream, read_native_host_manifest,
     send_ipc_request,
@@ -54,6 +55,34 @@ enum CliCommand {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// 管理本地 Agent 可使用的固定 Workspace
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkspaceCommand {
+    /// 保存一个已经存在的本地目录
+    Add {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        path: PathBuf,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// 列出全部 Workspace 与当前状态
+    List(OutputArgs),
+    /// 诊断一个或全部 Workspace
+    Doctor {
+        identifier: Option<String>,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// 只删除配置引用，不删除真实目录
+    Remove { identifier: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -309,7 +338,84 @@ fn run(cli: Cli) -> Result<i32, CliError> {
         }
         Some(CliCommand::Connection { command }) => run_connection_command(command),
         Some(CliCommand::Agent { command }) => run_agent_command(command),
+        Some(CliCommand::Workspace { command }) => run_workspace_command(command),
     }
+}
+
+fn run_workspace_command(command: WorkspaceCommand) -> Result<i32, CliError> {
+    let paths = AgentFerryPaths::discover()?;
+    match command {
+        WorkspaceCommand::Add { name, path, output } => {
+            let workspace = agent_ferry_core::workspace::add(&paths, &name, &path)?;
+            let diagnosis = diagnose_workspace(&workspace);
+            print_workspace_diagnoses(&[diagnosis], output.json)?;
+            Ok(0)
+        }
+        WorkspaceCommand::List(output) => {
+            let config = agent_ferry_core::workspace::load(&paths)?;
+            let diagnoses = config
+                .workspaces
+                .iter()
+                .map(diagnose_workspace)
+                .collect::<Vec<_>>();
+            print_workspace_diagnoses(&diagnoses, output.json)?;
+            Ok(0)
+        }
+        WorkspaceCommand::Doctor { identifier, output } => {
+            let config = agent_ferry_core::workspace::load(&paths)?;
+            let selected = config
+                .workspaces
+                .iter()
+                .filter(|workspace| {
+                    identifier
+                        .as_ref()
+                        .is_none_or(|value| workspace.id == *value || workspace.name == *value)
+                })
+                .map(diagnose_workspace)
+                .collect::<Vec<_>>();
+            if let Some(identifier) = identifier
+                && selected.is_empty()
+            {
+                return Err(CliError::WorkspaceNotFound(identifier));
+            }
+            let ready = selected
+                .iter()
+                .all(|diagnosis| diagnosis.state == WorkspaceState::Ready);
+            print_workspace_diagnoses(&selected, output.json)?;
+            Ok(i32::from(!ready))
+        }
+        WorkspaceCommand::Remove { identifier } => {
+            let removed = agent_ferry_core::workspace::remove(&paths, &identifier)?;
+            println!(
+                "已移除 Workspace 配置: {} ({})；真实目录未删除",
+                removed.name,
+                removed.path.display()
+            );
+            Ok(0)
+        }
+    }
+}
+
+fn print_workspace_diagnoses(
+    diagnoses: &[agent_ferry_core::workspace::WorkspaceDiagnosis],
+    json: bool,
+) -> Result<(), CliError> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(diagnoses)?);
+    } else if diagnoses.is_empty() {
+        println!("尚未配置 Workspace");
+    } else {
+        for diagnosis in diagnoses {
+            println!(
+                "{}  {}  {:?}  {}",
+                diagnosis.id,
+                diagnosis.name,
+                diagnosis.state,
+                diagnosis.path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn run_agent_command(command: AgentCommand) -> Result<i32, CliError> {
@@ -1206,6 +1312,10 @@ enum CliError {
     Claude(#[from] agent_ferry_claude::ClaudeError),
     #[error(transparent)]
     OpenCode(#[from] agent_ferry_opencode::OpenCodeError),
+    #[error(transparent)]
+    Workspace(#[from] agent_ferry_core::workspace::WorkspaceError),
+    #[error("未找到 Workspace: {0}")]
+    WorkspaceNotFound(String),
     #[error("请显式传入 --prompt-stdin，Prompt 不允许进入 argv")]
     ClaudePromptStdinRequired,
     #[error("Claude 文档超过 8 MiB 上限")]
