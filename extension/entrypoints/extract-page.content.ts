@@ -1,4 +1,5 @@
 import Defuddle from "defuddle";
+import { MAX_HANDOFF_CONTENT_BYTES } from "../lib/handoff-transfer";
 
 export type CapturedPage = {
   url: string;
@@ -14,7 +15,6 @@ export type CapturedPage = {
 const MAX_SCROLL_ROUNDS = 6;
 const MAX_SCROLL_HEIGHT = 100_000;
 const LOAD_WAIT_MS = 250;
-const MAX_MARKDOWN_BYTES = 800 * 1024;
 
 export default defineContentScript({
   registration: "runtime",
@@ -49,8 +49,8 @@ export default defineContentScript({
       if (markdown.length < 200 || parsed.wordCount < 40) {
         throw new Error("提取到的正文过短，可能仍未加载完整，请稍后重试");
       }
-      if (byteLength > MAX_MARKDOWN_BYTES) {
-        throw new Error("正文超过当前版本的 800 KiB 上限，分块交接将在后续版本支持");
+      if (byteLength > MAX_HANDOFF_CONTENT_BYTES) {
+        throw new Error("正文超过当前版本的 8 MiB 传输上限");
       }
       return {
         url: location.href,

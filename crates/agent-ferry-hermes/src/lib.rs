@@ -518,6 +518,9 @@ impl HermesClient {
             .send()
             .await
             .map_err(HermesError::RunTransport)?;
+        if response.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            return Err(HermesError::RunInputTooLarge);
+        }
         if !response.status().is_success() {
             return Err(HermesError::RunHttp(response.status().as_u16()));
         }
@@ -745,6 +748,8 @@ pub enum HermesError {
     RunTransport(reqwest::Error),
     #[error("Hermes Run API 返回 HTTP {0}")]
     RunHttp(u16),
+    #[error("Hermes 拒绝 Run input（HTTP 413）：正文超过该服务器允许的请求大小")]
+    RunInputTooLarge,
     #[error("Hermes SSE 单条事件超过 256 KiB")]
     RunEventTooLarge,
     #[error("Hermes SSE 在终态事件之前结束")]

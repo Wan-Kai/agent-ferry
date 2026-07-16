@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="author" content="Agent Ferry E2E" />
+    <title>Agent Ferry 大正文分块验证</title>
+    <style>body { max-width: 760px; margin: 40px auto; font: 17px/1.75 system-ui, sans-serif; }</style>
+  </head>
+  <body>
+    <main><article id="article"><h1>Agent Ferry 大正文分块验证</h1></article></main>
+    <script>
+      const article = document.querySelector("#article");
+      const fragment = document.createDocumentFragment();
+      for (let index = 1; index <= 1100; index += 1) {
+        const paragraph = document.createElement("p");
+        paragraph.textContent = `第 ${index} 段：这一段用于验证大正文经过 begin、chunk、end 协议后保持顺序与完整性。每个分块都有明确大小，daemon 只会在收到全部分块并验证 SHA-256 后创建 Hermes Run。`;
+        fragment.append(paragraph);
+      }
+      const ending = document.createElement("p");
+      ending.textContent = "LARGE-CONTENT-END-1100";
+      fragment.append(ending);
+      article.append(fragment);
+    </script>
+  </body>
+</html>

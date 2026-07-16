@@ -78,6 +78,20 @@ async fn serve(
             .and_then(|value| value.get("input")?.as_str().map(ToOwned::to_owned))
             .is_some_and(|input| input.starts_with(&format!("{expected}\n\n---")))
     });
+    let (input_bytes, input_has_large_end) = if first_line == "POST /v1/runs HTTP/1.1" {
+        let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+        let input = serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| value.get("input")?.as_str().map(ToOwned::to_owned));
+        (
+            input.as_deref().map(str::len),
+            input
+                .as_deref()
+                .is_some_and(|value| value.contains("LARGE-CONTENT-END-1100")),
+        )
+    } else {
+        (None, false)
+    };
     let (status, content_type, body) = if first_line == "GET /v1/capabilities HTTP/1.1"
         && authorized
     {
@@ -114,7 +128,7 @@ async fn serve(
 
     // 日志只保留请求行与鉴权结果，确保端到端验证本身不会把测试 token 写入日志。
     eprintln!(
-        "fake-hermes request line={first_line:?} authorized={authorized} prompt_matches={prompt_matches:?}"
+        "fake-hermes request line={first_line:?} authorized={authorized} prompt_matches={prompt_matches:?} input_bytes={input_bytes:?} input_has_large_end={input_has_large_end}"
     );
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

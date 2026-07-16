@@ -238,3 +238,46 @@ async fn dropping_observer_never_stops_a_remote_run() {
         panic!("关闭观察者后不应产生额外 HTTP 请求");
     }
 }
+
+#[tokio::test]
+async fn reports_server_input_limit_as_an_explicit_failed_event() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("启动限制大小的 fake Hermes");
+    let address = listener.local_addr().expect("读取 fake Hermes 地址");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("接受 run submission");
+        let request = read_request(&mut stream).await;
+        write_json(
+            &mut stream,
+            "413 Payload Too Large",
+            r#"{"error":"input_too_large"}"#,
+        )
+        .await;
+        request
+    });
+
+    let connection = HermesConnection::direct("fake", &format!("http://{address}"), None)
+        .expect("创建 fake Connection");
+    let client = HermesClient::new(Duration::from_secs(2)).expect("创建 Hermes client");
+    let mut receiver = client.run(
+        connection,
+        b"integration-token".to_vec(),
+        "超出服务端限制的正文".to_owned(),
+        true,
+    );
+    let failed = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        .await
+        .expect("等待显式失败不应超时")
+        .expect("应收到失败事件");
+    assert_eq!(failed.kind, HandoffEventKind::Failed);
+    assert!(
+        failed
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("413") && text.contains("正文")),
+        "失败信息应明确说明 Hermes 服务端正文大小限制"
+    );
+    let request = server.await.expect("等待 fake Hermes");
+    assert!(request.head.starts_with("POST /v1/runs HTTP/1.1"));
+}

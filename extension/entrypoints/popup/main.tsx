@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import ReactDOM from "react-dom/client";
 import type { CapturedPage } from "../extract-page.content";
+import { prepareHandoffTransfer } from "../../lib/handoff-transfer";
 import {
   DEFAULT_PROMPT,
   EMPTY_PROMPT_TEMPLATE_SETTINGS,
@@ -43,6 +44,13 @@ type HandoffEvent = {
   run_id?: string;
   text?: string;
 };
+type HandoffTransferAck = {
+  protocol_version: number;
+  request_id: string;
+  task_id: string;
+  phase: "begin" | "chunk";
+  next_index: number;
+};
 type ConnectionState =
   | { kind: "checking" }
   | { kind: "ready"; result: StatusResult }
@@ -51,7 +59,7 @@ type RunState = { kind: "idle" } | { kind: "capturing" } | { kind: "running" | "
 type TemplateDraft = { id?: string; name: string; content: string };
 type ChromeScriptingApi = {
   scripting: {
-    executeScript(options: { target: { tabId: number }; files: string[] }): Promise<Array<{ result?: unknown }>>;
+    executeScript(options: { target: { tabId: number }; files: string[] }): Promise<Array<{ result?: unknown; error?: string }>>;
   };
 };
 
@@ -170,18 +178,64 @@ function App() {
         target: { tabId: tab.id },
         files: ["/content-scripts/extract-page.js"],
       });
-      const source = results[0]?.result as CapturedPage | undefined;
-      if (!source) throw new Error("页面提取没有返回正文");
+      const injection = results[0];
+      const source = injection?.result as CapturedPage | undefined;
+      if (!source) throw new Error(injection?.error || "页面提取没有返回正文");
+      const transfer = await prepareHandoffTransfer(source.markdown);
+      const { markdown: _markdown, ...sourceMetadata } = source;
 
       const requestId = crypto.randomUUID();
       const taskId = crypto.randomUUID();
       const port = browser.runtime.connectNative(NATIVE_HOST_NAME);
       let lastSequence = -1;
-      setRun({ kind: "running", label: "正在提交给 Hermes…", output: "" });
-      port.onMessage.addListener((message: HostResponse | HandoffEvent) => {
+      let expectedAckNext = 0;
+      let expectedTransferPhase: "begin" | "chunk" | "events" = "begin";
+      let endSent = false;
+      setRun({ kind: "running", label: `正在传输正文 0/${transfer.chunks.length}`, output: "" });
+      const sendChunk = (index: number) => {
+        const data = transfer.chunks[index];
+        if (data === undefined) throw new Error("本地正文分块索引越界");
+        expectedTransferPhase = "chunk";
+        expectedAckNext = index + 1;
+        port.postMessage({
+          protocol_version: PROTOCOL_VERSION,
+          request_id: requestId,
+          command: { type: "handoff_chunk", task_id: taskId, index, data },
+        });
+      };
+      port.onMessage.addListener((message: HostResponse | HandoffEvent | HandoffTransferAck) => {
         if (message.request_id !== requestId) return;
         if ("error" in message && message.error) {
           setRun({ kind: "failed", label: message.error.message, output: "" });
+          port.disconnect();
+          return;
+        }
+        if ("phase" in message) {
+          if (message.task_id !== taskId) {
+            setRun({ kind: "failed", label: "正文传输 task_id 不一致", output: "" });
+            port.disconnect();
+            return;
+          }
+          const validBegin = expectedTransferPhase === "begin" && message.phase === "begin" && message.next_index === 0;
+          const validChunk = expectedTransferPhase === "chunk" && message.phase === "chunk" && message.next_index === expectedAckNext;
+          if (!validBegin && !validChunk) {
+            setRun({ kind: "failed", label: "正文传输 ACK 顺序无效", output: "" });
+            port.disconnect();
+            return;
+          }
+          if (message.next_index < transfer.chunks.length) {
+            setRun({ kind: "running", label: `正在传输正文 ${message.next_index}/${transfer.chunks.length}`, output: "" });
+            sendChunk(message.next_index);
+          } else if (!endSent) {
+            endSent = true;
+            expectedTransferPhase = "events";
+            setRun({ kind: "running", label: "正文完整性校验中…", output: "" });
+            port.postMessage({
+              protocol_version: PROTOCOL_VERSION,
+              request_id: requestId,
+              command: { type: "handoff_end", task_id: taskId },
+            });
+          }
           return;
         }
         if (!("task_id" in message) || message.task_id !== taskId || message.sequence <= lastSequence) return;
@@ -204,7 +258,16 @@ function App() {
       port.postMessage({
         protocol_version: PROTOCOL_VERSION,
         request_id: requestId,
-        command: { type: "handoff", task_id: taskId, target_id: selectedTarget, prompt, source },
+        command: {
+          type: "handoff_begin",
+          task_id: taskId,
+          target_id: selectedTarget,
+          prompt,
+          source: sourceMetadata,
+          total_bytes: transfer.totalBytes,
+          total_chunks: transfer.chunks.length,
+          sha256: transfer.sha256,
+        },
       });
     } catch (error) {
       setRun({ kind: "failed", label: error instanceof Error ? error.message : String(error), output: "" });

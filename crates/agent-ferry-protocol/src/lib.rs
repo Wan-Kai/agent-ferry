@@ -6,6 +6,9 @@ use thiserror::Error;
 
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+pub const MAX_HANDOFF_CHUNK_BYTES: usize = 192 * 1024;
+pub const MAX_HANDOFF_CONTENT_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_HANDOFF_CHUNKS: u32 = 43;
 pub const NATIVE_HOST_NAME: &str = "com.agentferry.host";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +51,23 @@ pub enum Command {
         prompt: String,
         source: SourceDocument,
     },
+    HandoffBegin {
+        task_id: String,
+        target_id: String,
+        prompt: String,
+        source: SourceMetadata,
+        total_bytes: usize,
+        total_chunks: u32,
+        sha256: String,
+    },
+    HandoffChunk {
+        task_id: String,
+        index: u32,
+        data: String,
+    },
+    HandoffEnd {
+        task_id: String,
+    },
 }
 
 impl std::fmt::Debug for Command {
@@ -83,6 +103,37 @@ impl std::fmt::Debug for Command {
                 .field("source_url", &source.url)
                 .field("content", &"[REDACTED]")
                 .finish(),
+            Self::HandoffBegin {
+                task_id,
+                target_id,
+                prompt: _,
+                source,
+                total_bytes,
+                total_chunks,
+                sha256: _,
+            } => formatter
+                .debug_struct("HandoffBegin")
+                .field("task_id", task_id)
+                .field("target_id", target_id)
+                .field("source_url", &source.url)
+                .field("total_bytes", total_bytes)
+                .field("total_chunks", total_chunks)
+                .field("content", &"[REDACTED]")
+                .finish(),
+            Self::HandoffChunk {
+                task_id,
+                index,
+                data: _,
+            } => formatter
+                .debug_struct("HandoffChunk")
+                .field("task_id", task_id)
+                .field("index", index)
+                .field("data", &"[REDACTED]")
+                .finish(),
+            Self::HandoffEnd { task_id } => formatter
+                .debug_struct("HandoffEnd")
+                .field("task_id", task_id)
+                .finish(),
         }
     }
 }
@@ -95,6 +146,9 @@ impl Command {
             Self::ConnectionAdd { .. } => "connection_add",
             Self::ConnectionRemove { .. } => "connection_remove",
             Self::Handoff { .. } => "handoff",
+            Self::HandoffBegin { .. } => "handoff_begin",
+            Self::HandoffChunk { .. } => "handoff_chunk",
+            Self::HandoffEnd { .. } => "handoff_end",
         }
     }
 }
@@ -109,6 +163,49 @@ pub struct SourceDocument {
     pub extractor: String,
     pub markdown: String,
     pub word_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceMetadata {
+    pub url: String,
+    pub title: String,
+    pub author: Option<String>,
+    pub published: Option<String>,
+    pub site: Option<String>,
+    pub extractor: String,
+    pub word_count: usize,
+}
+
+impl SourceMetadata {
+    #[must_use]
+    pub fn with_markdown(self, markdown: String) -> SourceDocument {
+        SourceDocument {
+            url: self.url,
+            title: self.title,
+            author: self.author,
+            published: self.published,
+            site: self.site,
+            extractor: self.extractor,
+            markdown,
+            word_count: self.word_count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HandoffTransferPhase {
+    Begin,
+    Chunk,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffTransferAck {
+    pub protocol_version: u16,
+    pub request_id: String,
+    pub task_id: String,
+    pub phase: HandoffTransferPhase,
+    pub next_index: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,6 +459,18 @@ mod tests {
 
         let rendered = format!("{command:?}");
         assert!(!rendered.contains("must-stay-secret"));
+        assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn chunk_debug_never_exposes_page_content() {
+        let command = Command::HandoffChunk {
+            task_id: "task-1".to_owned(),
+            index: 2,
+            data: "must-stay-private-page-content".to_owned(),
+        };
+        let rendered = format!("{command:?}");
+        assert!(!rendered.contains("must-stay-private-page-content"));
         assert!(rendered.contains("[REDACTED]"));
     }
 

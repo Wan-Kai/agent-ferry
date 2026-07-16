@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -5,7 +6,7 @@ use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent_ferry_core::{AgentFerryPaths, load_or_create_connector_token};
 use agent_ferry_hermes::{
@@ -14,13 +15,17 @@ use agent_ferry_hermes::{
 };
 use agent_ferry_protocol::{
     Command, ConnectorKind, ErrorCode, HandoffEvent, HandoffTargetKind, HandoffTargetState,
-    HandoffTargetStatus, HostRequest, HostResponse, IpcEnvelope, MAX_MESSAGE_BYTES,
-    PROTOCOL_VERSION, ServiceState, SourceDocument, StatusResult,
+    HandoffTargetStatus, HandoffTransferAck, HandoffTransferPhase, HostRequest, HostResponse,
+    IpcEnvelope, MAX_HANDOFF_CHUNK_BYTES, MAX_HANDOFF_CHUNKS, MAX_HANDOFF_CONTENT_BYTES,
+    MAX_MESSAGE_BYTES, PROTOCOL_VERSION, ServiceState, SourceDocument, SourceMetadata,
+    StatusResult,
 };
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 #[derive(Debug)]
@@ -30,6 +35,36 @@ pub struct Daemon {
     auth_token: Arc<str>,
     chrome_seen: Arc<AtomicBool>,
     hermes_client: Arc<HermesClient>,
+    handoff_assemblies: Arc<Mutex<HashMap<String, HandoffAssembly>>>,
+}
+
+const MAX_ACTIVE_HANDOFF_ASSEMBLIES: usize = 8;
+const HANDOFF_ASSEMBLY_TTL: Duration = Duration::from_secs(5 * 60);
+
+struct HandoffAssembly {
+    target_id: String,
+    prompt: String,
+    source: SourceMetadata,
+    total_bytes: usize,
+    total_chunks: u32,
+    sha256: String,
+    next_index: u32,
+    bytes: Vec<u8>,
+    updated_at: Instant,
+}
+
+impl std::fmt::Debug for HandoffAssembly {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HandoffAssembly")
+            .field("target_id", &self.target_id)
+            .field("source_url", &self.source.url)
+            .field("total_bytes", &self.total_bytes)
+            .field("total_chunks", &self.total_chunks)
+            .field("next_index", &self.next_index)
+            .field("content", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl Daemon {
@@ -65,6 +100,7 @@ impl Daemon {
             auth_token: Arc::from(auth_token),
             chrome_seen: Arc::new(AtomicBool::new(false)),
             hermes_client: Arc::new(hermes_client),
+            handoff_assemblies: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -96,6 +132,7 @@ impl Daemon {
                     let chrome_seen = Arc::clone(&self.chrome_seen);
                     let paths = self.paths.clone();
                     let hermes_client = Arc::clone(&self.hermes_client);
+                    let handoff_assemblies = Arc::clone(&self.handoff_assemblies);
                     tokio::spawn(async move {
                         if let Err(error) = handle_connection(
                             stream,
@@ -103,6 +140,7 @@ impl Daemon {
                             &chrome_seen,
                             &paths,
                             &hermes_client,
+                            &handoff_assemblies,
                         ).await {
                             warn!(error = %error, "本地 Connector 请求失败");
                         }
@@ -117,12 +155,14 @@ impl Daemon {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_connection(
     mut stream: UnixStream,
     expected_token: &str,
     chrome_seen: &AtomicBool,
     paths: &AgentFerryPaths,
     hermes_client: &HermesClient,
+    handoff_assemblies: &Mutex<HashMap<String, HandoffAssembly>>,
 ) -> io::Result<()> {
     let payload = match read_async_frame(&mut stream).await {
         Ok(payload) => payload,
@@ -181,40 +221,109 @@ async fn handle_connection(
         command = request.command.name(),
         "处理本地 Connector 请求"
     );
-    if let Command::Handoff {
-        task_id,
-        target_id,
-        prompt,
-        source,
-    } = request.command
-    {
-        return stream_handoff(
-            &mut stream,
-            request.request_id,
+    let request_id = request.request_id;
+    match request.command {
+        Command::Handoff {
             task_id,
             target_id,
             prompt,
             source,
-            &envelope.connector,
-            paths,
-            hermes_client,
-        )
-        .await;
+        } => {
+            stream_handoff(
+                &mut stream,
+                request_id,
+                task_id,
+                target_id,
+                prompt,
+                source,
+                &envelope.connector,
+                paths,
+                hermes_client,
+            )
+            .await
+        }
+        Command::HandoffBegin {
+            task_id,
+            target_id,
+            prompt,
+            source,
+            total_bytes,
+            total_chunks,
+            sha256,
+        } => {
+            let result = begin_handoff_transfer(
+                &request_id,
+                task_id,
+                target_id,
+                prompt,
+                source,
+                total_bytes,
+                total_chunks,
+                sha256,
+                &envelope.connector,
+                handoff_assemblies,
+            )
+            .await;
+            write_transfer_result(&mut stream, result).await
+        }
+        Command::HandoffChunk {
+            task_id,
+            index,
+            data,
+        } => {
+            let result = append_handoff_chunk(
+                &request_id,
+                task_id,
+                index,
+                data,
+                &envelope.connector,
+                handoff_assemblies,
+            )
+            .await;
+            write_transfer_result(&mut stream, result).await
+        }
+        Command::HandoffEnd { task_id } => {
+            match finish_handoff_transfer(
+                &request_id,
+                task_id,
+                &envelope.connector,
+                handoff_assemblies,
+            )
+            .await
+            {
+                Ok(handoff) => {
+                    stream_handoff(
+                        &mut stream,
+                        request_id,
+                        handoff.task_id,
+                        handoff.target_id,
+                        handoff.prompt,
+                        handoff.source,
+                        &envelope.connector,
+                        paths,
+                        hermes_client,
+                    )
+                    .await
+                }
+                Err(response) => write_async_json(&mut stream, &response).await,
+            }
+        }
+        command => {
+            let response = dispatch_request(
+                HostRequest {
+                    protocol_version: request.protocol_version,
+                    request_id,
+                    command,
+                },
+                &envelope.connector,
+                chrome_seen,
+                paths,
+                hermes_client,
+            )
+            .await;
+            write_async_json(&mut stream, &response).await
+        }
     }
-
-    let response = dispatch_request(
-        HostRequest {
-            protocol_version: request.protocol_version,
-            request_id: request.request_id,
-            command: request.command,
-        },
-        &envelope.connector,
-        chrome_seen,
-        paths,
-        hermes_client,
-    )
-    .await;
-    write_async_json(&mut stream, &response).await
 }
 
 async fn dispatch_request(
@@ -301,7 +410,10 @@ async fn dispatch_request(
             )
             .await
         }
-        Command::Handoff { .. } => HostResponse::failure(
+        Command::Handoff { .. }
+        | Command::HandoffBegin { .. }
+        | Command::HandoffChunk { .. }
+        | Command::HandoffEnd { .. } => HostResponse::failure(
             request.request_id,
             ErrorCode::Internal,
             "Handoff 未进入流式处理路径",
@@ -335,7 +447,15 @@ fn decode_request(value: Value) -> Result<HostRequest, HostResponse> {
         .and_then(Value::as_str);
     if !matches!(
         command_type,
-        Some("status" | "connection_add" | "connection_remove" | "handoff")
+        Some(
+            "status"
+                | "connection_add"
+                | "connection_remove"
+                | "handoff"
+                | "handoff_begin"
+                | "handoff_chunk"
+                | "handoff_end"
+        )
     ) {
         return Err(HostResponse::failure(
             &request_id,
@@ -353,6 +473,265 @@ fn decode_request(value: Value) -> Result<HostRequest, HostResponse> {
             false,
         )
     })
+}
+
+struct PreparedHandoff {
+    task_id: String,
+    target_id: String,
+    prompt: String,
+    source: SourceDocument,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn begin_handoff_transfer(
+    request_id: &str,
+    task_id: String,
+    target_id: String,
+    prompt: String,
+    source: SourceMetadata,
+    total_bytes: usize,
+    total_chunks: u32,
+    sha256: String,
+    connector: &ConnectorKind,
+    assemblies: &Mutex<HashMap<String, HandoffAssembly>>,
+) -> Result<HandoffTransferAck, HostResponse> {
+    validate_transfer_connector(request_id, connector)?;
+    validate_task_id(request_id, &task_id)?;
+    if !safe_identifier(&target_id) {
+        return Err(transfer_failure(request_id, "target_id 无效"));
+    }
+    if prompt.trim().is_empty() || prompt.len() > 16 * 1024 {
+        return Err(transfer_failure(
+            request_id,
+            "Prompt 不能为空且不得超过 16 KiB",
+        ));
+    }
+    if source_metadata_invalid(&source) {
+        return Err(transfer_failure(request_id, "页面来源元数据无效"));
+    }
+    if total_bytes < 200 {
+        return Err(transfer_failure(request_id, "正文不得少于 200 字节"));
+    }
+    if total_bytes > MAX_HANDOFF_CONTENT_BYTES {
+        return Err(HostResponse::failure(
+            request_id,
+            ErrorCode::MessageTooLarge,
+            format!(
+                "正文大小必须在 200 字节到 {} MiB 之间",
+                MAX_HANDOFF_CONTENT_BYTES / 1024 / 1024
+            ),
+            false,
+        ));
+    }
+    if total_chunks == 0 || total_chunks > MAX_HANDOFF_CHUNKS {
+        return Err(transfer_failure(request_id, "正文分块数量超出协议上限"));
+    }
+    if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(transfer_failure(
+            request_id,
+            "sha256 必须是 64 位十六进制字符串",
+        ));
+    }
+
+    let mut active = assemblies.lock().await;
+    active.retain(|_, assembly| assembly.updated_at.elapsed() <= HANDOFF_ASSEMBLY_TTL);
+    if active.contains_key(&task_id) {
+        return Err(transfer_failure(request_id, "task_id 已存在未完成的传输"));
+    }
+    if active.len() >= MAX_ACTIVE_HANDOFF_ASSEMBLIES {
+        // 无法从独立 IPC 连接判断 begin 是否已被客户端放弃，因此绝不能静默淘汰已 ACK 的任务。
+        // 中断项由 TTL 回收；满额期间显式拒绝新任务，让发送方稍后重试。
+        return Err(HostResponse::failure(
+            request_id,
+            ErrorCode::MessageTooLarge,
+            "并发正文传输数量已达上限，请稍后重试",
+            true,
+        ));
+    }
+    active.insert(
+        task_id.clone(),
+        HandoffAssembly {
+            target_id,
+            prompt,
+            source,
+            total_bytes,
+            total_chunks,
+            sha256: sha256.to_ascii_lowercase(),
+            next_index: 0,
+            // begin 可能永远收不到 chunk；延迟分配避免中断传输仅凭声明就长期占用 8 MiB。
+            bytes: Vec::new(),
+            updated_at: Instant::now(),
+        },
+    );
+    Ok(HandoffTransferAck {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: request_id.to_owned(),
+        task_id,
+        phase: HandoffTransferPhase::Begin,
+        next_index: 0,
+    })
+}
+
+async fn append_handoff_chunk(
+    request_id: &str,
+    task_id: String,
+    index: u32,
+    data: String,
+    connector: &ConnectorKind,
+    assemblies: &Mutex<HashMap<String, HandoffAssembly>>,
+) -> Result<HandoffTransferAck, HostResponse> {
+    validate_transfer_connector(request_id, connector)?;
+    validate_task_id(request_id, &task_id)?;
+    let mut active = assemblies.lock().await;
+    let Some(mut assembly) = active.remove(&task_id) else {
+        return Err(transfer_failure(request_id, "未找到对应的 handoff_begin"));
+    };
+    let chunk_bytes = data.as_bytes();
+    if chunk_bytes.is_empty() || chunk_bytes.len() > MAX_HANDOFF_CHUNK_BYTES {
+        // 任意非法 chunk 都终止整个 assembly，禁止发送方在收到失败后继续拼出一个可提交的 Run。
+        return Err(HostResponse::failure(
+            request_id,
+            ErrorCode::MessageTooLarge,
+            "chunk 不能为空且不得超过 192 KiB",
+            false,
+        ));
+    }
+    if assembly.updated_at.elapsed() > HANDOFF_ASSEMBLY_TTL {
+        return Err(transfer_failure(request_id, "正文传输已过期，请重新发送"));
+    }
+    if index != assembly.next_index {
+        return Err(transfer_failure(
+            request_id,
+            format!("chunk 顺序错误：期望 {}，收到 {index}", assembly.next_index),
+        ));
+    }
+    if index >= assembly.total_chunks
+        || assembly.bytes.len().saturating_add(chunk_bytes.len()) > assembly.total_bytes
+    {
+        return Err(transfer_failure(request_id, "chunk 超出声明的正文边界"));
+    }
+    assembly.bytes.extend_from_slice(chunk_bytes);
+    assembly.next_index += 1;
+    assembly.updated_at = Instant::now();
+    let next_index = assembly.next_index;
+    active.insert(task_id.clone(), assembly);
+    Ok(HandoffTransferAck {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: request_id.to_owned(),
+        task_id,
+        phase: HandoffTransferPhase::Chunk,
+        next_index,
+    })
+}
+
+async fn finish_handoff_transfer(
+    request_id: &str,
+    task_id: String,
+    connector: &ConnectorKind,
+    assemblies: &Mutex<HashMap<String, HandoffAssembly>>,
+) -> Result<PreparedHandoff, HostResponse> {
+    validate_transfer_connector(request_id, connector)?;
+    validate_task_id(request_id, &task_id)?;
+    let Some(assembly) = assemblies.lock().await.remove(&task_id) else {
+        return Err(transfer_failure(request_id, "未找到对应的正文传输"));
+    };
+    if assembly.next_index != assembly.total_chunks {
+        return Err(transfer_failure(
+            request_id,
+            format!(
+                "正文分块不完整：期望 {} 块，只收到 {} 块",
+                assembly.total_chunks, assembly.next_index
+            ),
+        ));
+    }
+    if assembly.bytes.len() != assembly.total_bytes {
+        return Err(transfer_failure(
+            request_id,
+            format!(
+                "正文大小不一致：期望 {} 字节，收到 {} 字节",
+                assembly.total_bytes,
+                assembly.bytes.len()
+            ),
+        ));
+    }
+    let actual_sha256 = format!("{:x}", Sha256::digest(&assembly.bytes));
+    if actual_sha256 != assembly.sha256 {
+        return Err(transfer_failure(request_id, "正文 sha256 完整性校验失败"));
+    }
+    let markdown = String::from_utf8(assembly.bytes)
+        .map_err(|_| transfer_failure(request_id, "正文不是有效 UTF-8"))?;
+    Ok(PreparedHandoff {
+        task_id,
+        target_id: assembly.target_id,
+        prompt: assembly.prompt,
+        source: assembly.source.with_markdown(markdown),
+    })
+}
+
+fn validate_transfer_connector(
+    request_id: &str,
+    connector: &ConnectorKind,
+) -> Result<(), HostResponse> {
+    if *connector == ConnectorKind::ChromeNativeHost {
+        Ok(())
+    } else {
+        Err(HostResponse::failure(
+            request_id,
+            ErrorCode::PermissionDenied,
+            "只有浏览器 Connector 可以传输页面正文",
+            false,
+        ))
+    }
+}
+
+fn validate_task_id(request_id: &str, task_id: &str) -> Result<(), HostResponse> {
+    if safe_identifier(task_id) {
+        Ok(())
+    } else {
+        Err(transfer_failure(
+            request_id,
+            "task_id 只能包含字母、数字、连字符或下划线，且不得超过 128 字节",
+        ))
+    }
+}
+
+fn safe_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn source_metadata_invalid(source: &SourceMetadata) -> bool {
+    let valid_url = url::Url::parse(&source.url)
+        .ok()
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https"));
+    !valid_url
+        || source.url.len() > 8 * 1024
+        || source.title.trim().is_empty()
+        || source.title.len() > 1024
+        || source.extractor != "defuddle"
+        || source.word_count < 40
+        || source.word_count > 100_000_000
+        || [&source.author, &source.published, &source.site]
+            .into_iter()
+            .flatten()
+            .any(|value| value.len() > 1024)
+}
+
+fn transfer_failure(request_id: &str, message: impl Into<String>) -> HostResponse {
+    HostResponse::failure(request_id, ErrorCode::InvalidMessage, message, false)
+}
+
+async fn write_transfer_result(
+    stream: &mut UnixStream,
+    result: Result<HandoffTransferAck, HostResponse>,
+) -> io::Result<()> {
+    match result {
+        Ok(ack) => write_async_json(stream, &ack).await,
+        Err(response) => write_async_json(stream, &response).await,
+    }
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -521,7 +900,7 @@ fn task_source_invalid(source: &SourceDocument) -> bool {
         || source.extractor != "defuddle"
         || source.markdown.trim().len() < 200
         || source.word_count < 40
-        || source.markdown.len() > 800 * 1024
+        || source.markdown.len() > MAX_HANDOFF_CONTENT_BYTES
 }
 
 async fn status_response(
@@ -549,7 +928,11 @@ async fn status_response(
             } else {
                 ServiceState::NotDetected
             },
-            capabilities: vec!["target.read".to_owned(), "handoff.submit".to_owned()],
+            capabilities: vec![
+                "target.read".to_owned(),
+                "handoff.submit".to_owned(),
+                "handoff.chunked".to_owned(),
+            ],
             targets,
         },
     )
