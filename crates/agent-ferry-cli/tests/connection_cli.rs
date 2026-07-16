@@ -57,6 +57,30 @@ fn spawn_fake_hermes() -> (String, std::thread::JoinHandle<String>) {
     (format!("http://{address}"), task)
 }
 
+#[test]
+fn setup_rejects_invalid_name_before_daemon_or_remote_changes() {
+    let root = temporary_root();
+    let output = Command::new(env!("CARGO_BIN_EXE_aferry"))
+        .env("AGENT_FERRY_HOME", &root)
+        .args([
+            "connection",
+            "setup",
+            "hermes",
+            "--name",
+            " invalid ",
+            "--ssh-host",
+            "must-not-connect",
+            "--yes",
+        ])
+        .output()
+        .expect("运行非法 setup");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("setup stderr");
+    assert!(stderr.contains("Connection 名称"));
+    assert!(!stderr.contains("agentferryd"));
+    let _ = fs::remove_dir_all(root);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_add_list_and_doctor_keep_token_out_of_files_and_output() {
     let root = temporary_root();

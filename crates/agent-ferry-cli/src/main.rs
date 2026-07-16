@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, IsTerminal as _, Read, Write as _};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -14,6 +14,8 @@ use agent_ferry_protocol::{
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use uuid::Uuid;
+
+mod hermes_setup;
 
 #[derive(Debug, Parser)]
 #[command(name = "aferry", version, about = "Agent Ferry 本机配置与诊断")]
@@ -60,6 +62,11 @@ enum NativeHostCommand {
 
 #[derive(Debug, Subcommand)]
 enum ConnectionCommand {
+    /// 通过 SSH 准备标准 Docker Hermes，并创建 Connection
+    Setup {
+        #[command(subcommand)]
+        kind: ConnectionSetupKind,
+    },
     /// 新增一种远程 Connection
     Add {
         #[command(subcommand)]
@@ -78,6 +85,24 @@ enum ConnectionCommand {
     Remove {
         /// Connection ID 或名称
         identifier: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConnectionSetupKind {
+    /// 识别并安全配置官方 Docker gateway 容器
+    Hermes {
+        #[arg(long)]
+        name: String,
+        /// 必须是可通过公钥非交互登录的 ~/.ssh/config host
+        #[arg(long)]
+        ssh_host: String,
+        /// 远端 Docker 容器名称
+        #[arg(long, default_value = "hermes")]
+        container: String,
+        /// 跳过交互确认；仅供用户已审阅计划后的自动化执行
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -250,6 +275,15 @@ fn collect_report() -> Result<SetupReport, CliError> {
 fn run_connection_command(command: ConnectionCommand) -> Result<i32, CliError> {
     let paths = AgentFerryPaths::discover()?;
     match command {
+        ConnectionCommand::Setup {
+            kind:
+                ConnectionSetupKind::Hermes {
+                    name,
+                    ssh_host,
+                    container,
+                    yes,
+                },
+        } => setup_docker_hermes(&paths, &name, &ssh_host, &container, yes),
         ConnectionCommand::Add {
             kind:
                 ConnectionKind::Hermes {
@@ -325,6 +359,113 @@ fn run_connection_command(command: ConnectionCommand) -> Result<i32, CliError> {
             Ok(0)
         }
     }
+}
+
+fn setup_docker_hermes(
+    paths: &AgentFerryPaths,
+    name: &str,
+    ssh_host: &str,
+    container: &str,
+    yes: bool,
+) -> Result<i32, CliError> {
+    if name.is_empty()
+        || name.len() > 128
+        || name.trim() != name
+        || name.chars().any(char::is_control)
+    {
+        return Err(CliError::InvalidConnectionName);
+    }
+    let existing = load_connections(&paths.hermes_connections)?
+        .connections
+        .into_iter()
+        .find(|connection| connection.name == name);
+    if let Some(existing) = existing {
+        let same_route = existing.endpoint.base_url.as_str() == "http://127.0.0.1:8642/"
+            && matches!(
+                existing.transport,
+                agent_ferry_hermes::HermesTransport::SshTunnel { ssh_host: ref configured }
+                    if configured == ssh_host
+            );
+        if !same_route {
+            return Err(CliError::ConnectionAlreadyExists(name.to_owned()));
+        }
+        let result = send_daemon_command(paths, Command::Status)?;
+        let target = result
+            .targets
+            .iter()
+            .find(|target| target.id == existing.id)
+            .ok_or_else(|| CliError::ConnectionNotFound(name.to_owned()))?;
+        if target.state != HandoffTargetState::Ready {
+            return Err(CliError::ExistingConnectionNotReady(
+                target_state_detail(target.state).to_owned(),
+            ));
+        }
+        println!("Hermes Connection 已准备且验证通过: {name}");
+        if !target.capabilities.is_empty() {
+            println!("  capabilities: {}", target.capabilities.join(", "));
+        }
+        return Ok(0);
+    }
+
+    // 远端变更前确认 daemon 可用，避免服务器准备成功后本机却无法保存 Connection。
+    send_daemon_command(paths, Command::Status)?;
+    let runner = hermes_setup::SshHermesSetup::system();
+    let preflight = runner.inspect(ssh_host, container)?;
+    println!("Hermes Docker 准备计划");
+    println!("  SSH Host:    {ssh_host}");
+    println!("  容器:        {}", preflight.container);
+    println!("  数据目录:    {} → /opt/data", preflight.data_source);
+    println!("  镜像:        {}", preflight.image);
+    if preflight.ready {
+        println!("  状态:        远端 API 已准备，将复用现有配置");
+    } else {
+        println!("  变更:        保留旧容器为 {}", preflight.backup_container);
+        println!("  变更:        新增 127.0.0.1:8642 → 容器 8642");
+        println!("  变更:        生成 API Key；不公开、不写入本机文件");
+    }
+
+    if !yes {
+        if !io::stdin().is_terminal() {
+            return Err(CliError::ConfirmationRequired);
+        }
+        print!("继续执行？[y/N] ");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
+            println!("已取消，远端未修改");
+            return Ok(0);
+        }
+    }
+
+    let prepared = runner.apply(ssh_host, container)?;
+    let result = send_daemon_command(
+        paths,
+        Command::ConnectionAdd {
+            name: name.to_owned(),
+            base_url: "http://127.0.0.1:8642".to_owned(),
+            model: None,
+            transport: ConnectionTransportConfig::SshTunnel {
+                ssh_host: ssh_host.to_owned(),
+            },
+            token: prepared.into_token(),
+        },
+    )?;
+    let target = result
+        .targets
+        .iter()
+        .find(|target| target.name == name)
+        .ok_or_else(|| CliError::ConnectionNotFound(name.to_owned()))?;
+    if target.state != HandoffTargetState::Ready {
+        return Err(CliError::PreparedConnectionNotReady(
+            target_state_detail(target.state).to_owned(),
+        ));
+    }
+    println!("已准备 Hermes 并完成 Connection 验证: {name}");
+    if !target.capabilities.is_empty() {
+        println!("  capabilities: {}", target.capabilities.join(", "));
+    }
+    Ok(0)
 }
 
 fn list_connections(paths: &AgentFerryPaths, output: &OutputArgs) -> Result<i32, CliError> {
@@ -633,6 +774,18 @@ enum CliError {
     TokenTooLarge,
     #[error("未找到 Hermes Connection: {0}")]
     ConnectionNotFound(String),
+    #[error("Hermes Connection 已存在: {0}；请先运行 connection doctor 或 remove")]
+    ConnectionAlreadyExists(String),
+    #[error("Connection 名称不能为空、不能包含首尾空白或控制字符，且最多 128 字节")]
+    InvalidConnectionName,
+    #[error("相同 Hermes Connection 已存在但诊断失败: {0}；请运行 connection doctor")]
+    ExistingConnectionNotReady(String),
+    #[error("需要交互确认；非交互执行时请在审阅计划后显式传入 --yes")]
+    ConfirmationRequired,
+    #[error("远端已准备，但 Connection 验证失败: {0}")]
+    PreparedConnectionNotReady(String),
+    #[error(transparent)]
+    HermesSetup(#[from] hermes_setup::HermesSetupError),
     #[error("agentferryd 拒绝命令: {0}")]
     DaemonRejected(String),
 }

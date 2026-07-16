@@ -10,6 +10,7 @@ dependencies = [
  "agent-ferry-daemon",
  "agent-ferry-hermes",
  "agent-ferry-protocol",
+ "agent-ferry-transport",
  "clap",
  "serde",
  "serde_json",
