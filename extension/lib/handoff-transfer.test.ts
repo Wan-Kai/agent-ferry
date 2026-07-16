@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_HANDOFF_CHUNK_BYTES,
   MAX_HANDOFF_CONTENT_BYTES,
+  MIN_X_HANDOFF_CONTENT_BYTES,
   prepareHandoffTransfer,
 } from "./handoff-transfer";
 
@@ -18,5 +19,11 @@ describe("Handoff 分块", () => {
   it("明确拒绝空正文和超过总量上限的正文", async () => {
     await expect(prepareHandoffTransfer("太短")).rejects.toThrow("过短");
     await expect(prepareHandoffTransfer("a".repeat(MAX_HANDOFF_CONTENT_BYTES + 1))).rejects.toThrow("8 MiB");
+  });
+
+  it("只为结构化 X 帖子接受较短正文", async () => {
+    const shortPost = "# X 帖子\n\n这是一条很短但结构完整的帖子正文。";
+    await expect(prepareHandoffTransfer(shortPost)).rejects.toThrow("过短");
+    await expect(prepareHandoffTransfer(shortPost, MIN_X_HANDOFF_CONTENT_BYTES)).resolves.toMatchObject({ chunks: [shortPost] });
   });
 });

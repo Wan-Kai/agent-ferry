@@ -1,6 +1,7 @@
 export const MAX_HANDOFF_CHUNK_BYTES = 192 * 1024;
 export const MAX_HANDOFF_CONTENT_BYTES = 8 * 1024 * 1024;
 export const MIN_HANDOFF_CONTENT_BYTES = 200;
+export const MIN_X_HANDOFF_CONTENT_BYTES = 40;
 const HANDOFF_CHUNK_INPUT_BYTES = MAX_HANDOFF_CHUNK_BYTES - 4;
 
 export type PreparedHandoffTransfer = {
@@ -9,9 +10,9 @@ export type PreparedHandoffTransfer = {
   chunks: string[];
 };
 
-export async function prepareHandoffTransfer(markdown: string): Promise<PreparedHandoffTransfer> {
+export async function prepareHandoffTransfer(markdown: string, minimumBytes = MIN_HANDOFF_CONTENT_BYTES): Promise<PreparedHandoffTransfer> {
   const bytes = new TextEncoder().encode(markdown);
-  if (bytes.byteLength < MIN_HANDOFF_CONTENT_BYTES) throw new Error("提取到的正文过短，不能创建 Handoff");
+  if (bytes.byteLength < minimumBytes) throw new Error("提取到的正文过短，不能创建 Handoff");
   if (bytes.byteLength > MAX_HANDOFF_CONTENT_BYTES) throw new Error("正文超过当前版本的 8 MiB 传输上限");
 
   const decoder = new TextDecoder("utf-8", { fatal: true });

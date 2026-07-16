@@ -21,6 +21,9 @@ async fn main() -> std::io::Result<()> {
     let address = env::var("FAKE_HERMES_ADDR").unwrap_or_else(|_| "127.0.0.1:18642".to_owned());
     let expected_token = env::var("FAKE_HERMES_TOKEN").unwrap_or_else(|_| "e2e-token".to_owned());
     let expected_prompt = env::var("FAKE_HERMES_EXPECT_PROMPT").ok();
+    let expected_input_markers = env::var("FAKE_HERMES_EXPECT_INPUT_MARKERS")
+        .ok()
+        .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok());
     let listener = TcpListener::bind(&address).await?;
     eprintln!("fake-hermes listening address={address}");
 
@@ -28,8 +31,9 @@ async fn main() -> std::io::Result<()> {
         let (stream, peer) = listener.accept().await?;
         let token = expected_token.clone();
         let prompt = expected_prompt.clone();
+        let markers = expected_input_markers.clone();
         tokio::spawn(async move {
-            if let Err(error) = serve(stream, &token, prompt.as_deref()).await {
+            if let Err(error) = serve(stream, &token, prompt.as_deref(), markers.as_deref()).await {
                 eprintln!("fake-hermes request_failed peer={peer} error={error}");
             }
         });
@@ -40,6 +44,7 @@ async fn serve(
     mut stream: TcpStream,
     expected_token: &str,
     expected_prompt: Option<&str>,
+    expected_input_markers: Option<&[String]>,
 ) -> std::io::Result<()> {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 1024];
@@ -78,20 +83,27 @@ async fn serve(
             .and_then(|value| value.get("input")?.as_str().map(ToOwned::to_owned))
             .is_some_and(|input| input.starts_with(&format!("{expected}\n\n---")))
     });
-    let (input_bytes, input_has_large_end) = if first_line == "POST /v1/runs HTTP/1.1" {
-        let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
-        let input = serde_json::from_str::<serde_json::Value>(body)
-            .ok()
-            .and_then(|value| value.get("input")?.as_str().map(ToOwned::to_owned));
-        (
-            input.as_deref().map(str::len),
-            input
-                .as_deref()
-                .is_some_and(|value| value.contains("LARGE-CONTENT-END-1100")),
-        )
-    } else {
-        (None, false)
-    };
+    let (input_bytes, input_has_large_end, input_marker_matches) =
+        if first_line == "POST /v1/runs HTTP/1.1" {
+            let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+            let input = serde_json::from_str::<serde_json::Value>(body)
+                .ok()
+                .and_then(|value| value.get("input")?.as_str().map(ToOwned::to_owned));
+            (
+                input.as_deref().map(str::len),
+                input
+                    .as_deref()
+                    .is_some_and(|value| value.contains("LARGE-CONTENT-END-1100")),
+                expected_input_markers.map(|markers| {
+                    markers
+                        .iter()
+                        .map(|marker| input.as_deref().is_some_and(|value| value.contains(marker)))
+                        .collect::<Vec<_>>()
+                }),
+            )
+        } else {
+            (None, false, None)
+        };
     let (status, content_type, body) = if first_line == "GET /v1/capabilities HTTP/1.1"
         && authorized
     {
@@ -128,7 +140,7 @@ async fn serve(
 
     // 日志只保留请求行与鉴权结果，确保端到端验证本身不会把测试 token 写入日志。
     eprintln!(
-        "fake-hermes request line={first_line:?} authorized={authorized} prompt_matches={prompt_matches:?} input_bytes={input_bytes:?} input_has_large_end={input_has_large_end}"
+        "fake-hermes request line={first_line:?} authorized={authorized} prompt_matches={prompt_matches:?} input_bytes={input_bytes:?} input_has_large_end={input_has_large_end} input_marker_matches={input_marker_matches:?}"
     );
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

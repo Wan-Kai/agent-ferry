@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import ReactDOM from "react-dom/client";
-import type { CapturedPage } from "../extract-page.content";
-import { prepareHandoffTransfer } from "../../lib/handoff-transfer";
+import type { CapturedPage, CapturedPageResult } from "../extract-page.content";
+import { MIN_X_HANDOFF_CONTENT_BYTES, prepareHandoffTransfer } from "../../lib/handoff-transfer";
 import {
   DEFAULT_PROMPT,
   EMPTY_PROMPT_TEMPLATE_SETTINGS,
@@ -179,9 +179,11 @@ function App() {
         files: ["/content-scripts/extract-page.js"],
       });
       const injection = results[0];
-      const source = injection?.result as CapturedPage | undefined;
-      if (!source) throw new Error(injection?.error || "页面提取没有返回正文");
-      const transfer = await prepareHandoffTransfer(source.markdown);
+      const captureResult = injection?.result as CapturedPageResult | undefined;
+      if (!captureResult) throw new Error(injection?.error || "页面提取没有返回正文");
+      if ("error" in captureResult) throw new Error(captureResult.error);
+      const source: CapturedPage = captureResult;
+      const transfer = await prepareHandoffTransfer(source.markdown, source.extractor === "x-thread" ? MIN_X_HANDOFF_CONTENT_BYTES : undefined);
       const { markdown: _markdown, ...sourceMetadata } = source;
 
       const requestId = crypto.randomUUID();

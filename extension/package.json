@@ -16,9 +16,10 @@
     "react-dom": "latest"
   },
   "devDependencies": {
-    "@wxt-dev/module-react": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
+    "@wxt-dev/module-react": "latest",
+    "linkedom": "^0.18.13",
     "typescript": "latest",
     "vitest": "latest",
     "wxt": "latest"

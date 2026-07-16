@@ -509,15 +509,19 @@ async fn begin_handoff_transfer(
     if source_metadata_invalid(&source) {
         return Err(transfer_failure(request_id, "页面来源元数据无效"));
     }
-    if total_bytes < 200 {
-        return Err(transfer_failure(request_id, "正文不得少于 200 字节"));
+    let minimum_bytes = minimum_markdown_length(&source.extractor);
+    if total_bytes < minimum_bytes {
+        return Err(transfer_failure(
+            request_id,
+            format!("正文不得少于 {minimum_bytes} 字节"),
+        ));
     }
     if total_bytes > MAX_HANDOFF_CONTENT_BYTES {
         return Err(HostResponse::failure(
             request_id,
             ErrorCode::MessageTooLarge,
             format!(
-                "正文大小必须在 200 字节到 {} MiB 之间",
+                "正文大小必须在 {minimum_bytes} 字节到 {} MiB 之间",
                 MAX_HANDOFF_CONTENT_BYTES / 1024 / 1024
             ),
             false,
@@ -704,15 +708,12 @@ fn safe_identifier(value: &str) -> bool {
 }
 
 fn source_metadata_invalid(source: &SourceMetadata) -> bool {
-    let valid_url = url::Url::parse(&source.url)
-        .ok()
-        .is_some_and(|url| matches!(url.scheme(), "http" | "https"));
-    !valid_url
+    !source_url_valid_for_extractor(&source.url, &source.extractor)
         || source.url.len() > 8 * 1024
         || source.title.trim().is_empty()
         || source.title.len() > 1024
-        || source.extractor != "defuddle"
-        || source.word_count < 40
+        || !matches!(source.extractor.as_str(), "defuddle" | "x-thread")
+        || source.word_count < minimum_word_count(&source.extractor)
         || source.word_count > 100_000_000
         || [&source.author, &source.published, &source.site]
             .into_iter()
@@ -892,15 +893,48 @@ fn compose_handoff_input(prompt: &str, source: &SourceDocument) -> Result<String
 }
 
 fn task_source_invalid(source: &SourceDocument) -> bool {
-    let valid_url = url::Url::parse(&source.url)
-        .ok()
-        .is_some_and(|url| matches!(url.scheme(), "http" | "https"));
-    !valid_url
+    !source_url_valid_for_extractor(&source.url, &source.extractor)
         || source.title.trim().is_empty()
-        || source.extractor != "defuddle"
-        || source.markdown.trim().len() < 200
-        || source.word_count < 40
+        || !matches!(source.extractor.as_str(), "defuddle" | "x-thread")
+        || source.markdown.trim().len() < minimum_markdown_length(&source.extractor)
+        || source.word_count < minimum_word_count(&source.extractor)
         || source.markdown.len() > MAX_HANDOFF_CONTENT_BYTES
+}
+
+fn minimum_word_count(extractor: &str) -> usize {
+    // 单条 X 帖子天然可能很短；结构化提取器已要求永久链接命中当前 status，不能套用长文章阈值。
+    if extractor == "x-thread" { 1 } else { 40 }
+}
+
+fn minimum_markdown_length(extractor: &str) -> usize {
+    if extractor == "x-thread" { 40 } else { 200 }
+}
+
+fn source_url_valid_for_extractor(value: &str, extractor: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    if extractor != "x-thread" {
+        return extractor == "defuddle";
+    }
+    let valid_host = url.host_str().is_some_and(|host| {
+        matches!(
+            host.to_ascii_lowercase().as_str(),
+            "x.com" | "www.x.com" | "twitter.com" | "www.twitter.com"
+        )
+    });
+    let mut segments = url.path_segments().into_iter().flatten();
+    let user = segments.next().unwrap_or_default();
+    let status = segments.next().unwrap_or_default();
+    let id = segments.next().unwrap_or_default();
+    valid_host
+        && !user.is_empty()
+        && status == "status"
+        && !id.is_empty()
+        && id.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 async fn status_response(
@@ -1055,5 +1089,60 @@ mod tests {
             word_count: 2,
         };
         assert!(compose_handoff_input("分析", &source).is_err());
+    }
+
+    #[test]
+    fn handoff_accepts_a_short_structured_x_post() {
+        let source = SourceDocument {
+            url: "https://x.com/agentferry/status/100".to_owned(),
+            title: "X 线程：@agentferry".to_owned(),
+            author: Some("Agent Ferry @agentferry".to_owned()),
+            published: Some("2026-07-16T01:02:03.000Z".to_owned()),
+            site: Some("X (Twitter)".to_owned()),
+            extractor: "x-thread".to_owned(),
+            markdown: "# X 线程：@agentferry\n\n### 主帖\n\n- 链接：https://x.com/agentferry/status/100\n\n好的。".to_owned(),
+            word_count: 5,
+        };
+        assert!(compose_handoff_input("分析", &source).is_ok());
+    }
+
+    #[tokio::test]
+    async fn chunked_begin_accepts_short_x_only_for_a_real_status_url() {
+        let source = SourceMetadata {
+            url: "https://x.com/agentferry/status/100".to_owned(),
+            title: "X 对话：@agentferry".to_owned(),
+            author: Some("Agent Ferry @agentferry".to_owned()),
+            published: Some("2026-07-16T01:02:03.000Z".to_owned()),
+            site: Some("X (Twitter)".to_owned()),
+            extractor: "x-thread".to_owned(),
+            word_count: 5,
+        };
+        let assemblies = Mutex::new(HashMap::new());
+        let result = begin_handoff_transfer(
+            "request",
+            "task-short-x".to_owned(),
+            "target".to_owned(),
+            "分析".to_owned(),
+            source.clone(),
+            80,
+            1,
+            "0".repeat(64),
+            &ConnectorKind::ChromeNativeHost,
+            &assemblies,
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let mut forged = source;
+        forged.url = "https://example.com/article".to_owned();
+        assert!(source_metadata_invalid(&forged));
+        assert!(source_url_valid_for_extractor(
+            "https://twitter.com/agentferry/status/100/photo/1",
+            "x-thread"
+        ));
+        assert!(!source_url_valid_for_extractor(
+            "https://x.com/agentferry/status/100evil",
+            "x-thread"
+        ));
     }
 }
