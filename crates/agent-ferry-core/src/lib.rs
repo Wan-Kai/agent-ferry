@@ -18,6 +18,8 @@ pub const HOME_ENV: &str = "AGENT_FERRY_HOME";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentFerryPaths {
     pub root: PathBuf,
+    pub config_dir: PathBuf,
+    pub hermes_connections: PathBuf,
     pub run_dir: PathBuf,
     pub socket: PathBuf,
     pub connector_token: PathBuf,
@@ -54,6 +56,7 @@ impl AgentFerryPaths {
 
     #[must_use]
     pub fn from_root(root: PathBuf) -> Self {
+        let config_dir = root.join("config");
         let run_dir = root.join("run");
         let native_host_manifest = root
             .join("native-messaging")
@@ -61,6 +64,8 @@ impl AgentFerryPaths {
         Self {
             socket: run_dir.join("agentferryd.sock"),
             connector_token: run_dir.join("connector.token"),
+            hermes_connections: config_dir.join("hermes-connections.json"),
+            config_dir,
             run_dir,
             native_host_manifest,
             root,
@@ -76,6 +81,18 @@ impl AgentFerryPaths {
         fs::create_dir_all(&self.run_dir)?;
         fs::set_permissions(&self.root, fs::Permissions::from_mode(0o700))?;
         fs::set_permissions(&self.run_dir, fs::Permissions::from_mode(0o700))?;
+        Ok(())
+    }
+
+    /// 创建仅限当前用户访问的持久配置目录。
+    ///
+    /// # Errors
+    ///
+    /// 目录创建或权限设置失败时返回错误。
+    pub fn ensure_private_config(&self) -> Result<(), CoreError> {
+        fs::create_dir_all(&self.config_dir)?;
+        fs::set_permissions(&self.root, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(&self.config_dir, fs::Permissions::from_mode(0o700))?;
         Ok(())
     }
 }

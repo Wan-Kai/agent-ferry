@@ -95,6 +95,92 @@ h1 {
   line-height: 1.5;
 }
 
+.targets {
+  margin: 0 0 16px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 2px 8px;
+  color: #68756d;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+}
+
+.section-heading p,
+.empty-target p,
+.target-name,
+.target-detail {
+  margin: 0;
+}
+
+.section-heading span {
+  display: grid;
+  min-width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 9px;
+  background: #e2ded3;
+  letter-spacing: 0;
+}
+
+.empty-target,
+.target {
+  border: 1px solid #d8d2c3;
+  border-radius: 11px;
+  padding: 13px;
+  background: rgba(255, 255, 255, 0.34);
+}
+
+.empty-target p {
+  color: #4d5c54;
+  font-size: 13px;
+}
+
+.empty-target code {
+  display: block;
+  margin-top: 5px;
+  color: #747d77;
+  font-size: 11px;
+}
+
+.target {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.target + .target {
+  margin-top: 7px;
+}
+
+.target-dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #b95a42;
+}
+
+.target-ready {
+  background: #2b8a57;
+  box-shadow: 0 0 0 4px rgba(43, 138, 87, 0.12);
+}
+
+.target-name {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.target-detail {
+  margin-top: 2px;
+  color: #68756d;
+  font-size: 11px;
+}
+
 button {
   width: 100%;
   border-radius: 9px;

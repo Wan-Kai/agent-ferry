@@ -18,9 +18,18 @@ fn temporary_root() -> PathBuf {
 }
 
 fn send_envelope(paths: &AgentFerryPaths, auth_token: String, request: Value) -> HostResponse {
+    send_as(paths, auth_token, ConnectorKind::Cli, request)
+}
+
+fn send_as(
+    paths: &AgentFerryPaths,
+    auth_token: String,
+    connector: ConnectorKind,
+    request: Value,
+) -> HostResponse {
     let envelope = IpcEnvelope {
         auth_token,
-        connector: ConnectorKind::Cli,
+        connector,
         request,
     };
     let mut stream = UnixStream::connect(&paths.socket).expect("连接 daemon socket");
@@ -81,6 +90,25 @@ async fn socket_boundary_rejects_unauthorized_version_unknown_and_malformed_requ
         failure_code(version_mismatch),
         ErrorCode::ProtocolVersionUnsupported
     );
+
+    let extension_admin = send_as(
+        &paths,
+        token.clone(),
+        ConnectorKind::ChromeNativeHost,
+        json!({
+            "protocol_version": 1,
+            "request_id": "extension-admin",
+            "command": {
+                "type": "connection_add",
+                "name": "forbidden",
+                "base_url": "http://127.0.0.1:8642",
+                "model": null,
+                "token": "must-not-be-stored"
+            }
+        }),
+    );
+    assert_eq!(failure_code(extension_admin), ErrorCode::PermissionDenied);
+    assert!(!paths.hermes_connections.exists());
 
     let unknown_command = send_envelope(
         &paths,

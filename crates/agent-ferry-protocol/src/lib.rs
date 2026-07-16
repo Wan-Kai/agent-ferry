@@ -29,10 +29,55 @@ pub struct HostRequest {
     pub command: Command,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
     Status,
+    ConnectionAdd {
+        name: String,
+        base_url: String,
+        model: Option<String>,
+        token: String,
+    },
+    ConnectionRemove {
+        identifier: String,
+    },
+}
+
+impl std::fmt::Debug for Command {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Command 可能被上层错误链或诊断工具整体格式化；在协议层统一脱敏，避免未来新增日志时意外泄露 Bearer Token。
+        match self {
+            Self::Status => formatter.write_str("Status"),
+            Self::ConnectionAdd {
+                name,
+                base_url,
+                model,
+                token: _,
+            } => formatter
+                .debug_struct("ConnectionAdd")
+                .field("name", name)
+                .field("base_url", base_url)
+                .field("model", model)
+                .field("token", &"[REDACTED]")
+                .finish(),
+            Self::ConnectionRemove { identifier } => formatter
+                .debug_struct("ConnectionRemove")
+                .field("identifier", identifier)
+                .finish(),
+        }
+    }
+}
+
+impl Command {
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Status => "status",
+            Self::ConnectionAdd { .. } => "connection_add",
+            Self::ConnectionRemove { .. } => "connection_remove",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +95,31 @@ pub enum ServiceState {
     NotDetected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HandoffTargetKind {
+    RemoteHermes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HandoffTargetState {
+    Ready,
+    CredentialMissing,
+    AuthenticationFailed,
+    ConnectionFailed,
+    Incompatible,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffTargetStatus {
+    pub id: String,
+    pub name: String,
+    pub kind: HandoffTargetKind,
+    pub state: HandoffTargetState,
+    pub capabilities: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusResult {
     pub core_version: String,
@@ -57,6 +127,8 @@ pub struct StatusResult {
     pub native_host: ServiceState,
     pub chrome_extension: ServiceState,
     pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub targets: Vec<HandoffTargetStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +149,7 @@ pub struct ProtocolError {
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     AuthenticationFailed,
+    PermissionDenied,
     DaemonUnavailable,
     InvalidMessage,
     MessageTooLarge,
@@ -221,6 +294,20 @@ mod tests {
 
         let decoded: HostRequest = read_json_frame(&mut bytes.as_slice()).expect("读取 frame");
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn command_debug_never_exposes_connection_token() {
+        let command = Command::ConnectionAdd {
+            name: "remote".to_owned(),
+            base_url: "https://hermes.example".to_owned(),
+            model: None,
+            token: "must-stay-secret".to_owned(),
+        };
+
+        let rendered = format!("{command:?}");
+        assert!(!rendered.contains("must-stay-secret"));
+        assert!(rendered.contains("[REDACTED]"));
     }
 
     #[test]

@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 agent-ferry-core = { path = "../agent-ferry-core" }
+agent-ferry-hermes = { path = "../agent-ferry-hermes" }
 agent-ferry-protocol = { path = "../agent-ferry-protocol" }
 clap.workspace = true
 serde.workspace = true
@@ -19,3 +20,7 @@ uuid.workspace = true
 [[bin]]
 name = "aferry"
 path = "src/main.rs"
+
+[dev-dependencies]
+agent-ferry-daemon = { path = "../agent-ferry-daemon" }
+tokio.workspace = true

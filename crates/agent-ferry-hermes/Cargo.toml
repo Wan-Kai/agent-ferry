@@ -1,0 +1,19 @@
+[package]
+name = "agent-ferry-hermes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+agent-ferry-core = { path = "../agent-ferry-core" }
+reqwest.workspace = true
+security-framework.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
+uuid.workspace = true

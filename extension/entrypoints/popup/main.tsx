@@ -11,6 +11,20 @@ type StatusResult = {
   native_host: "ready" | "not_detected";
   chrome_extension: "ready" | "not_detected";
   capabilities: string[];
+  targets?: HandoffTargetStatus[];
+};
+
+type HandoffTargetStatus = {
+  id: string;
+  name: string;
+  kind: "remote_hermes";
+  state:
+    | "ready"
+    | "credential_missing"
+    | "authentication_failed"
+    | "connection_failed"
+    | "incompatible";
+  capabilities: string[];
 };
 
 type HostResponse = {
@@ -38,6 +52,21 @@ function unavailableDetail(error: unknown): string {
     return "当前扩展不在 Native Host allowlist 中。请用本扩展 ID 重新执行注册命令。";
   }
   return `本地连接不可用：${message}`;
+}
+
+function targetStateLabel(state: HandoffTargetStatus["state"]): string {
+  switch (state) {
+    case "ready":
+      return "可用";
+    case "credential_missing":
+      return "凭据缺失";
+    case "authentication_failed":
+      return "认证失败";
+    case "connection_failed":
+      return "无法连接";
+    case "incompatible":
+      return "能力不兼容";
+  }
 }
 
 function App() {
@@ -99,13 +128,43 @@ function App() {
         </div>
       </section>
 
+      {connection.kind === "ready" && (
+        <section className="targets" aria-label="可用目标">
+          <div className="section-heading">
+            <p>REMOTE HERMES</p>
+            <span>{connection.result.targets?.length ?? 0}</span>
+          </div>
+          {(connection.result.targets?.length ?? 0) === 0 ? (
+            <div className="empty-target">
+              <p>尚未配置远程目标</p>
+              <code>aferry connection add hermes</code>
+            </div>
+          ) : (
+            connection.result.targets?.map((target) => (
+              <article className="target" key={target.id}>
+                <span className={`target-dot target-${target.state}`} />
+                <div>
+                  <p className="target-name">{target.name}</p>
+                  <p className="target-detail">
+                    {targetStateLabel(target.state)}
+                    {target.state === "ready" && target.capabilities.includes("run.events_sse")
+                      ? " · 实时输出"
+                      : ""}
+                  </p>
+                </div>
+              </article>
+            ))
+          )}
+        </section>
+      )}
+
       {connection.kind === "unavailable" && (
         <button className="secondary" type="button" onClick={() => void checkConnection()}>
           重新检查
         </button>
       )}
 
-      <button className="primary" type="button" disabled={connection.kind !== "ready"}>
+      <button className="primary" type="button" disabled>
         发送当前页面
       </button>
       <p className="footnote">页面提取将在下一阶段开放</p>

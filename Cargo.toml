@@ -4,6 +4,7 @@ members = [
     "crates/agent-ferry-core",
     "crates/agent-ferry-daemon",
     "crates/agent-ferry-host",
+    "crates/agent-ferry-hermes",
     "crates/agent-ferry-protocol",
 ]
 resolver = "3"
@@ -17,11 +18,14 @@ rust-version = "1.85"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+security-framework = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
+url = { version = "2", features = ["serde"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -5,11 +5,17 @@ use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use agent_ferry_core::{AgentFerryPaths, load_or_create_connector_token};
+use agent_ferry_hermes::{
+    DiagnosisState, HermesClient, HermesConnection, KeychainCredentialStore, add_connection,
+    load_connections, remove_connection,
+};
 use agent_ferry_protocol::{
-    Command, ConnectorKind, ErrorCode, HostRequest, HostResponse, IpcEnvelope, MAX_MESSAGE_BYTES,
-    PROTOCOL_VERSION, ServiceState, StatusResult,
+    Command, ConnectorKind, ErrorCode, HandoffTargetKind, HandoffTargetState, HandoffTargetStatus,
+    HostRequest, HostResponse, IpcEnvelope, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, ServiceState,
+    StatusResult,
 };
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -22,6 +28,7 @@ pub struct Daemon {
     listener: UnixListener,
     auth_token: Arc<str>,
     chrome_seen: Arc<AtomicBool>,
+    hermes_client: Arc<HermesClient>,
 }
 
 impl Daemon {
@@ -50,11 +57,13 @@ impl Daemon {
 
         let listener = UnixListener::bind(&paths.socket)?;
         std::fs::set_permissions(&paths.socket, std::fs::Permissions::from_mode(0o600))?;
+        let hermes_client = HermesClient::new(Duration::from_secs(5)).map_err(io::Error::other)?;
         Ok(Self {
             paths,
             listener,
             auth_token: Arc::from(auth_token),
             chrome_seen: Arc::new(AtomicBool::new(false)),
+            hermes_client: Arc::new(hermes_client),
         })
     }
 
@@ -84,8 +93,16 @@ impl Daemon {
                     let (stream, _) = accepted?;
                     let token = Arc::clone(&self.auth_token);
                     let chrome_seen = Arc::clone(&self.chrome_seen);
+                    let paths = self.paths.clone();
+                    let hermes_client = Arc::clone(&self.hermes_client);
                     tokio::spawn(async move {
-                        if let Err(error) = handle_connection(stream, &token, &chrome_seen).await {
+                        if let Err(error) = handle_connection(
+                            stream,
+                            &token,
+                            &chrome_seen,
+                            &paths,
+                            &hermes_client,
+                        ).await {
                             warn!(error = %error, "本地 Connector 请求失败");
                         }
                     });
@@ -103,6 +120,8 @@ async fn handle_connection(
     mut stream: UnixStream,
     expected_token: &str,
     chrome_seen: &AtomicBool,
+    paths: &AgentFerryPaths,
+    hermes_client: &HermesClient,
 ) -> io::Result<()> {
     let payload = match read_async_frame(&mut stream).await {
         Ok(payload) => payload,
@@ -148,86 +167,234 @@ async fn handle_connection(
     if envelope.connector == ConnectorKind::ChromeNativeHost {
         chrome_seen.store(true, Ordering::Release);
     }
-    let response = dispatch_request(envelope.request, &envelope.connector, chrome_seen);
+    let response = dispatch_request(
+        envelope.request,
+        &envelope.connector,
+        chrome_seen,
+        paths,
+        hermes_client,
+    )
+    .await;
     write_async_json(&mut stream, &response).await
 }
 
-fn dispatch_request(
+async fn dispatch_request(
     value: Value,
     connector: &ConnectorKind,
     chrome_seen: &AtomicBool,
+    paths: &AgentFerryPaths,
+    hermes_client: &HermesClient,
 ) -> HostResponse {
+    let request = match decode_request(value) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+
+    info!(
+        request_id = request.request_id,
+        connector = ?connector,
+        command = request.command.name(),
+        "处理本地 Connector 请求"
+    );
+    match request.command {
+        Command::Status => {
+            status_response(
+                request.request_id,
+                connector,
+                chrome_seen,
+                paths,
+                hermes_client,
+            )
+            .await
+        }
+        Command::ConnectionAdd {
+            name,
+            base_url,
+            model,
+            token,
+        } => {
+            if *connector != ConnectorKind::Cli {
+                return HostResponse::failure(
+                    request.request_id,
+                    ErrorCode::PermissionDenied,
+                    "Chrome Connector 无权修改 Hermes Connection",
+                    false,
+                );
+            }
+            let operation =
+                HermesConnection::direct(&name, &base_url, model).and_then(|connection| {
+                    add_connection(
+                        paths,
+                        &KeychainCredentialStore,
+                        connection,
+                        token.as_bytes(),
+                    )
+                });
+            if let Err(error) = operation {
+                return HostResponse::failure(
+                    request.request_id,
+                    ErrorCode::InvalidMessage,
+                    error.to_string(),
+                    false,
+                );
+            }
+            status_response(
+                request.request_id,
+                connector,
+                chrome_seen,
+                paths,
+                hermes_client,
+            )
+            .await
+        }
+        Command::ConnectionRemove { identifier } => {
+            if *connector != ConnectorKind::Cli {
+                return HostResponse::failure(
+                    request.request_id,
+                    ErrorCode::PermissionDenied,
+                    "Chrome Connector 无权修改 Hermes Connection",
+                    false,
+                );
+            }
+            if let Err(error) = remove_connection(paths, &KeychainCredentialStore, &identifier) {
+                return HostResponse::failure(
+                    request.request_id,
+                    ErrorCode::InvalidMessage,
+                    error.to_string(),
+                    false,
+                );
+            }
+            status_response(
+                request.request_id,
+                connector,
+                chrome_seen,
+                paths,
+                hermes_client,
+            )
+            .await
+        }
+    }
+}
+
+fn decode_request(value: Value) -> Result<HostRequest, HostResponse> {
     let request_id = request_id_from_value(&value);
     let Some(protocol_version) = value.get("protocol_version").and_then(Value::as_u64) else {
-        return HostResponse::failure(
+        return Err(HostResponse::failure(
             &request_id,
             ErrorCode::InvalidMessage,
             "缺少 protocol_version",
             false,
-        );
+        ));
     };
     if protocol_version != u64::from(PROTOCOL_VERSION) {
-        return HostResponse::failure(
+        return Err(HostResponse::failure(
             &request_id,
             ErrorCode::ProtocolVersionUnsupported,
             format!("不支持协议版本 {protocol_version}，当前版本为 {PROTOCOL_VERSION}"),
             false,
-        );
+        ));
     }
 
     let command_type = value
         .get("command")
         .and_then(|command| command.get("type"))
         .and_then(Value::as_str);
-    if command_type != Some("status") {
-        return HostResponse::failure(
+    if !matches!(
+        command_type,
+        Some("status" | "connection_add" | "connection_remove")
+    ) {
+        return Err(HostResponse::failure(
             &request_id,
             ErrorCode::UnknownCommand,
             format!("未知命令 {}", command_type.unwrap_or("<missing>")),
             false,
-        );
+        ));
     }
 
-    let request: HostRequest = match serde_json::from_value(value) {
-        Ok(request) => request,
+    serde_json::from_value(value).map_err(|error| {
+        HostResponse::failure(
+            request_id,
+            ErrorCode::InvalidMessage,
+            format!("请求结构无效: {error}"),
+            false,
+        )
+    })
+}
+
+async fn status_response(
+    request_id: String,
+    connector: &ConnectorKind,
+    chrome_seen: &AtomicBool,
+    paths: &AgentFerryPaths,
+    hermes_client: &HermesClient,
+) -> HostResponse {
+    let targets = discover_hermes_targets(paths, hermes_client).await;
+    HostResponse::success(
+        request_id,
+        StatusResult {
+            core_version: env!("CARGO_PKG_VERSION").to_owned(),
+            daemon: ServiceState::Ready,
+            native_host: if *connector == ConnectorKind::ChromeNativeHost
+                || chrome_seen.load(Ordering::Acquire)
+            {
+                ServiceState::Ready
+            } else {
+                ServiceState::NotDetected
+            },
+            chrome_extension: if chrome_seen.load(Ordering::Acquire) {
+                ServiceState::Ready
+            } else {
+                ServiceState::NotDetected
+            },
+            capabilities: vec!["target.read".to_owned()],
+            targets,
+        },
+    )
+}
+
+async fn discover_hermes_targets(
+    paths: &AgentFerryPaths,
+    client: &HermesClient,
+) -> Vec<HandoffTargetStatus> {
+    let connections = match load_connections(&paths.hermes_connections) {
+        Ok(connections) => connections,
         Err(error) => {
-            return HostResponse::failure(
-                &request_id,
-                ErrorCode::InvalidMessage,
-                format!("请求结构无效: {error}"),
-                false,
-            );
+            warn!(error = %error, "无法读取 Hermes Connection 配置");
+            return Vec::new();
         }
     };
-
-    info!(
-        request_id = request.request_id,
-        connector = ?connector,
-        command = ?request.command,
-        "处理本地 Connector 请求"
-    );
-    match request.command {
-        Command::Status => HostResponse::success(
-            request.request_id,
-            StatusResult {
-                core_version: env!("CARGO_PKG_VERSION").to_owned(),
-                daemon: ServiceState::Ready,
-                native_host: if *connector == ConnectorKind::ChromeNativeHost
-                    || chrome_seen.load(Ordering::Acquire)
-                {
-                    ServiceState::Ready
-                } else {
-                    ServiceState::NotDetected
-                },
-                chrome_extension: if chrome_seen.load(Ordering::Acquire) {
-                    ServiceState::Ready
-                } else {
-                    ServiceState::NotDetected
-                },
-                capabilities: vec!["target.read".to_owned()],
+    let store = KeychainCredentialStore;
+    let mut targets = Vec::with_capacity(connections.connections.len());
+    for connection in connections.connections {
+        let diagnosis = match client.diagnose_with_store(&connection, &store).await {
+            Ok(diagnosis) => diagnosis,
+            Err(error) => {
+                warn!(connection_id = connection.id, error = %error, "Hermes 诊断失败");
+                targets.push(HandoffTargetStatus {
+                    id: connection.id,
+                    name: connection.name,
+                    kind: HandoffTargetKind::RemoteHermes,
+                    state: HandoffTargetState::ConnectionFailed,
+                    capabilities: Vec::new(),
+                });
+                continue;
+            }
+        };
+        targets.push(HandoffTargetStatus {
+            id: diagnosis.id,
+            name: diagnosis.name,
+            kind: HandoffTargetKind::RemoteHermes,
+            state: match diagnosis.state {
+                DiagnosisState::Ready => HandoffTargetState::Ready,
+                DiagnosisState::CredentialMissing => HandoffTargetState::CredentialMissing,
+                DiagnosisState::AuthenticationFailed => HandoffTargetState::AuthenticationFailed,
+                DiagnosisState::ConnectionFailed => HandoffTargetState::ConnectionFailed,
+                DiagnosisState::Incompatible => HandoffTargetState::Incompatible,
             },
-        ),
+            capabilities: diagnosis.capabilities,
+        });
     }
+    targets
 }
 
 fn request_id_from_value(value: &Value) -> String {
