@@ -9,7 +9,7 @@ export type CapturedPage = {
   author: string | null;
   published: string | null;
   site: string | null;
-  extractor: "defuddle" | "x-thread" | "arxiv-html";
+  extractor: "defuddle" | "x-thread" | "arxiv-html" | "arxiv-pdf";
   markdown: string;
   word_count: number;
 };

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import ReactDOM from "react-dom/client";
 import type { CapturedPage, CapturedPageResult } from "../extract-page.content";
+import { extractArxivPdf, isArxivPdfUrl, type ArxivPdfProgress } from "../../lib/arxiv-pdf-extractor";
 import { MIN_X_HANDOFF_CONTENT_BYTES, prepareHandoffTransfer } from "../../lib/handoff-transfer";
 import {
   DEFAULT_PROMPT,
@@ -55,7 +56,7 @@ type ConnectionState =
   | { kind: "checking" }
   | { kind: "ready"; result: StatusResult }
   | { kind: "unavailable"; detail: string };
-type RunState = { kind: "idle" } | { kind: "capturing" } | { kind: "running" | "done" | "failed"; label: string; output: string };
+type RunState = { kind: "idle" } | { kind: "capturing"; label: string } | { kind: "running" | "done" | "failed"; label: string; output: string };
 type TemplateDraft = { id?: string; name: string; content: string };
 type ChromeScriptingApi = {
   scripting: {
@@ -74,6 +75,18 @@ function unavailableDetail(error: unknown): string {
 
 function targetStateLabel(state: HandoffTargetStatus["state"]): string {
   return ({ ready: "可用", credential_missing: "凭据缺失", authentication_failed: "认证失败", connection_failed: "无法连接", incompatible: "能力不兼容" })[state];
+}
+
+function pdfProgressLabel(progress: ArxivPdfProgress): string {
+  if (progress.stage === "opening") return "PDF 下载完成，正在读取文档结构…";
+  if (progress.stage === "extracting") {
+    return `正在提取 PDF 文本 ${progress.completed_pages}/${progress.total_pages} 页`;
+  }
+  const loaded = (progress.loaded_bytes / 1024 / 1024).toFixed(1);
+  if (progress.total_bytes) {
+    return `正在下载 PDF ${loaded}/${(progress.total_bytes / 1024 / 1024).toFixed(1)} MiB`;
+  }
+  return `正在下载 PDF ${loaded} MiB`;
 }
 
 function App() {
@@ -168,21 +181,28 @@ function App() {
 
   const startHandoff = useCallback(async () => {
     if (!selectedTarget || !prompt.trim()) return;
-    setRun({ kind: "capturing" });
+    setRun({ kind: "capturing", label: "正在读取当前页面…" });
     try {
       const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
       if (!tab.id || !tab.url?.match(/^https?:\/\//)) throw new Error("当前页面不是可提取的 http(s) 页面");
       // 当前首发平台明确是 Chrome MV3；原生命名空间比 polyfill 对 runtime content script 的支持更稳定。
       const chromeApi = (globalThis as typeof globalThis & { chrome: ChromeScriptingApi }).chrome;
-      const results = await chromeApi.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: ["/content-scripts/extract-page.js"],
-      });
-      const injection = results[0];
-      const captureResult = injection?.result as CapturedPageResult | undefined;
-      if (!captureResult) throw new Error(injection?.error || "页面提取没有返回正文");
-      if ("error" in captureResult) throw new Error(captureResult.error);
-      const source: CapturedPage = captureResult;
+      let source: CapturedPage;
+      if (isArxivPdfUrl(tab.url)) {
+        source = await extractArxivPdf(tab.url, fetch, (progress) => {
+          setRun({ kind: "capturing", label: pdfProgressLabel(progress) });
+        });
+      } else {
+        const results = await chromeApi.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ["/content-scripts/extract-page.js"],
+        });
+        const injection = results[0];
+        const captureResult = injection?.result as CapturedPageResult | undefined;
+        if (!captureResult) throw new Error(injection?.error || "页面提取没有返回正文");
+        if ("error" in captureResult) throw new Error(captureResult.error);
+        source = captureResult;
+      }
       const transfer = await prepareHandoffTransfer(source.markdown, source.extractor === "x-thread" ? MIN_X_HANDOFF_CONTENT_BYTES : undefined);
       const { markdown: _markdown, ...sourceMetadata } = source;
 
@@ -300,8 +320,8 @@ function App() {
       </section>}
       {connection.kind === "unavailable" && <button className="secondary" type="button" onClick={() => void checkConnection()}>重新检查</button>}
       <button className="primary" type="button" disabled={connection.kind !== "ready" || readyTargets.length === 0 || !selectedTarget || !prompt.trim() || run.kind === "capturing" || run.kind === "running"} onClick={() => void startHandoff()}>{run.kind === "capturing" ? "正在提取页面…" : run.kind === "running" ? "Hermes 正在处理…" : "发送当前页面"}</button>
-      {run.kind !== "idle" && run.kind !== "capturing" && <section className={`run run-${run.kind}`} aria-live="polite"><p className="run-label">{run.label}</p>{run.output && <pre>{run.output}</pre>}</section>}
-      <p className="footnote">关闭弹窗不会取消已提交的远端任务</p>
+      {run.kind !== "idle" && <section className={`run run-${run.kind}`} aria-live="polite"><p className="run-label">{run.label}</p>{"output" in run && run.output && <pre>{run.output}</pre>}</section>}
+      <p className="footnote">{run.kind === "capturing" ? "提取完成前请保持弹窗打开" : "关闭弹窗不会取消已提交的远端任务"}</p>
     </main>
   );
 }

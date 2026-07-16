@@ -714,7 +714,7 @@ fn source_metadata_invalid(source: &SourceMetadata) -> bool {
         || source.title.len() > 1024
         || !matches!(
             source.extractor.as_str(),
-            "defuddle" | "x-thread" | "arxiv-html"
+            "defuddle" | "x-thread" | "arxiv-html" | "arxiv-pdf"
         )
         || source.word_count < minimum_word_count(&source.extractor)
         || source.word_count > 100_000_000
@@ -900,7 +900,7 @@ fn task_source_invalid(source: &SourceDocument) -> bool {
         || source.title.trim().is_empty()
         || !matches!(
             source.extractor.as_str(),
-            "defuddle" | "x-thread" | "arxiv-html"
+            "defuddle" | "x-thread" | "arxiv-html" | "arxiv-pdf"
         )
         || source.markdown.trim().len() < minimum_markdown_length(&source.extractor)
         || source.word_count < minimum_word_count(&source.extractor)
@@ -923,18 +923,37 @@ fn source_url_valid_for_extractor(value: &str, extractor: &str) -> bool {
     if !matches!(url.scheme(), "http" | "https") {
         return false;
     }
-    if extractor == "arxiv-html" {
+    if matches!(extractor, "arxiv-html" | "arxiv-pdf") {
         let valid_host = url.host_str().is_some_and(|host| {
             matches!(
                 host.to_ascii_lowercase().as_str(),
                 "arxiv.org" | "www.arxiv.org"
             )
         });
+        let prefix = if extractor == "arxiv-html" {
+            "/html/"
+        } else {
+            "/pdf/"
+        };
         let identifier = url
             .path()
-            .strip_prefix("/html/")
+            .strip_prefix(prefix)
             .unwrap_or_default()
-            .trim_end_matches('/');
+            .strip_suffix('/')
+            .unwrap_or_else(|| url.path().strip_prefix(prefix).unwrap_or_default());
+        let identifier = if extractor == "arxiv-pdf" {
+            identifier
+                .rsplit_once('.')
+                .map_or(identifier, |(stem, suffix)| {
+                    if suffix.eq_ignore_ascii_case("pdf") {
+                        stem
+                    } else {
+                        identifier
+                    }
+                })
+        } else {
+            identifier
+        };
         return valid_host && valid_arxiv_identifier(identifier);
     }
     if extractor != "x-thread" {
@@ -981,11 +1000,22 @@ fn valid_arxiv_identifier(identifier: &str) -> bool {
     let Some((archive, number)) = identifier.split_once('/') else {
         return false;
     };
-    !archive.is_empty()
-        && archive
-            .bytes()
-            .all(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'-' | b'.'))
-        && versioned_digits(number, &[7])
+    let valid_archive = archive.split_once('.').map_or_else(
+        || {
+            archive
+                .bytes()
+                .all(|byte| byte.is_ascii_alphabetic() || byte == b'-')
+        },
+        |(base, suffix)| {
+            !base.is_empty()
+                && base
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphabetic() || byte == b'-')
+                && suffix.len() == 2
+                && suffix.bytes().all(|byte| byte.is_ascii_alphabetic())
+        },
+    );
+    !archive.is_empty() && valid_archive && versioned_digits(number, &[7])
 }
 
 async fn status_response(
@@ -1222,6 +1252,46 @@ mod tests {
         assert!(!source_url_valid_for_extractor(
             "https://arxiv.org/html/2402.08954evil",
             "arxiv-html"
+        ));
+    }
+
+    #[test]
+    fn arxiv_pdf_extractor_is_bound_to_a_valid_paper_route() {
+        assert!(source_url_valid_for_extractor(
+            "https://arxiv.org/pdf/2402.08954v2.pdf",
+            "arxiv-pdf"
+        ));
+        assert!(source_url_valid_for_extractor(
+            "https://arxiv.org/pdf/2402.08954v2.PdF",
+            "arxiv-pdf"
+        ));
+        assert!(source_url_valid_for_extractor(
+            "https://www.arxiv.org/pdf/hep-th/9901001V1?download=1",
+            "arxiv-pdf"
+        ));
+        assert!(!source_url_valid_for_extractor(
+            "https://arxiv.org/html/2402.08954",
+            "arxiv-pdf"
+        ));
+        assert!(!source_url_valid_for_extractor(
+            "https://example.com/pdf/2402.08954.pdf",
+            "arxiv-pdf"
+        ));
+        assert!(!source_url_valid_for_extractor(
+            "https://arxiv.org/pdf/2402.08954evil.pdf",
+            "arxiv-pdf"
+        ));
+        assert!(!source_url_valid_for_extractor(
+            "https://arxiv.org/pdf/2402.089%35%34.pdf",
+            "arxiv-pdf"
+        ));
+        assert!(!source_url_valid_for_extractor(
+            "https://arxiv.org/pdf/hep..th/9901001.pdf",
+            "arxiv-pdf"
+        ));
+        assert!(!source_url_valid_for_extractor(
+            "https://arxiv.org/pdf/2402.08954.pdf//",
+            "arxiv-pdf"
         ));
     }
 }
