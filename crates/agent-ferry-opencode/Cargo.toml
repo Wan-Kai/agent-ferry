@@ -1,0 +1,15 @@
+[package]
+name = "agent-ferry-opencode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+agent-ferry-core = { path = "../agent-ferry-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

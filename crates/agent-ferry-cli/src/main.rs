@@ -11,6 +11,10 @@ use agent_ferry_core::{
     send_ipc_request,
 };
 use agent_ferry_hermes::{ConnectionDiagnosis, DiagnosisState, load_connections};
+use agent_ferry_opencode::{
+    DEFAULT_OPENCODE_MODEL, MAX_OPENCODE_DOCUMENT_BYTES, OpenCodeDiagnosis, OpenCodeDocument,
+    OpenCodeState, OpenCodeTaskEvent,
+};
 use agent_ferry_protocol::{
     Command, ConnectionTransportConfig, ConnectorKind, FrameError, HandoffEvent, HandoffEventKind,
     HandoffTargetState, HandoffTargetStatus, HostRequest, HostResponse, MAX_HERMES_RUN_INPUT_BYTES,
@@ -58,6 +62,47 @@ enum AgentCommand {
     Claude {
         #[command(subcommand)]
         command: ClaudeCommand,
+    },
+    /// 管理用户自行安装的 OpenCode；Agent Ferry 不代为安装
+    Opencode {
+        #[command(subcommand)]
+        command: OpenCodeCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OpenCodeCommand {
+    /// 从 PATH 发现候选；单一且兼容时自动绑定
+    Detect {
+        #[arg(long, default_value = DEFAULT_OPENCODE_MODEL)]
+        model: String,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// 使用绝对路径与显式模型明确绑定 `OpenCode`
+    Bind {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long, default_value = DEFAULT_OPENCODE_MODEL)]
+        model: String,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// 诊断已绑定路径、run flags 和显式模型
+    Doctor(OutputArgs),
+    /// 在指定 Workspace 启动一个全新的 unrestricted 一次性任务
+    Run {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        document_file: PathBuf,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        source_url: String,
+        /// 从 stdin 读取 Prompt，避免进入 argv 和 shell history
+        #[arg(long)]
+        prompt_stdin: bool,
     },
 }
 
@@ -301,7 +346,80 @@ fn run_agent_command(command: AgentCommand) -> Result<i32, CliError> {
             print_claude_diagnosis(&diagnosis, output.json)?;
             Ok(i32::from(diagnosis.state != ClaudeState::Ready))
         }
+        AgentCommand::Opencode { command } => {
+            let (diagnosis, output) = match command {
+                OpenCodeCommand::Detect { model, output } => (
+                    agent_ferry_opencode::detect_and_auto_bind(&paths, &model)?,
+                    output,
+                ),
+                OpenCodeCommand::Bind {
+                    path,
+                    model,
+                    output,
+                } => (agent_ferry_opencode::bind(&paths, &path, &model)?, output),
+                OpenCodeCommand::Doctor(output) => {
+                    (agent_ferry_opencode::diagnose_binding(&paths)?, output)
+                }
+                OpenCodeCommand::Run {
+                    workspace,
+                    document_file,
+                    title,
+                    source_url,
+                    prompt_stdin,
+                } => {
+                    return run_opencode_task(
+                        &paths,
+                        &workspace,
+                        &document_file,
+                        title,
+                        source_url,
+                        prompt_stdin,
+                    );
+                }
+            };
+            print_opencode_diagnosis(&diagnosis, output.json)?;
+            Ok(i32::from(diagnosis.state != OpenCodeState::Ready))
+        }
     }
+}
+
+fn run_opencode_task(
+    paths: &AgentFerryPaths,
+    workspace: &Path,
+    document_file: &Path,
+    title: String,
+    source_url: String,
+    prompt_stdin: bool,
+) -> Result<i32, CliError> {
+    if !prompt_stdin {
+        return Err(CliError::OpenCodePromptStdinRequired);
+    }
+    let prompt = read_limited_input(io::stdin().lock())?;
+    let markdown =
+        read_limited_utf8_file(document_file, MAX_OPENCODE_DOCUMENT_BYTES).map_err(|error| {
+            match error {
+                CliError::ClaudeDocumentTooLarge => CliError::OpenCodeDocumentTooLarge,
+                CliError::ClaudeDocumentNotUtf8 => CliError::OpenCodeDocumentNotUtf8,
+                other => other,
+            }
+        })?;
+    let document = OpenCodeDocument {
+        title,
+        source_url,
+        markdown,
+    };
+    agent_ferry_opencode::run_task(paths, workspace, &prompt, &document, |event| match event {
+        OpenCodeTaskEvent::Started { task_id, artifact } => {
+            println!("OpenCode Task 已启动: {task_id}");
+            println!("Artifact: {}", artifact.display());
+        }
+        OpenCodeTaskEvent::Output(text) => print!("{text}"),
+        OpenCodeTaskEvent::Tool(text) => eprintln!("[opencode tool] {text}"),
+        OpenCodeTaskEvent::Diagnostic(text) => eprintln!("[opencode] {text}"),
+        OpenCodeTaskEvent::Completed(_) => println!("\nOpenCode Task 已完成"),
+        OpenCodeTaskEvent::Failed(text) => eprintln!("OpenCode Task 失败: {text}"),
+    })?;
+    Ok(0)
 }
 
 fn run_claude_task(
@@ -378,6 +496,29 @@ fn print_claude_diagnosis(diagnosis: &ClaudeDiagnosis, json: bool) -> Result<(),
         println!("  选择命令: aferry agent claude bind --path <absolute-path>");
     } else if diagnosis.state == ClaudeState::NotAuthenticated {
         println!("  请先运行 Claude Code 官方登录流程，再执行 aferry agent claude doctor");
+    }
+    Ok(())
+}
+
+fn print_opencode_diagnosis(diagnosis: &OpenCodeDiagnosis, json: bool) -> Result<(), CliError> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(diagnosis)?);
+    } else {
+        println!("OpenCode: {:?}", diagnosis.state);
+        println!("  {}", diagnosis.detail);
+        if let Some(executable) = &diagnosis.executable {
+            println!("  executable: {}", executable.display());
+        }
+        if let Some(version) = &diagnosis.version {
+            println!("  version: {version}");
+        }
+        if let Some(model) = &diagnosis.model {
+            println!("  model: {model}");
+        }
+        if diagnosis.state == OpenCodeState::NotDetected {
+            println!("  安装说明: https://opencode.ai/docs/");
+            println!("  安装完成后: aferry agent opencode detect");
+        }
     }
     Ok(())
 }
@@ -1063,12 +1204,20 @@ enum CliError {
     Hermes(#[from] agent_ferry_hermes::HermesError),
     #[error(transparent)]
     Claude(#[from] agent_ferry_claude::ClaudeError),
+    #[error(transparent)]
+    OpenCode(#[from] agent_ferry_opencode::OpenCodeError),
     #[error("请显式传入 --prompt-stdin，Prompt 不允许进入 argv")]
     ClaudePromptStdinRequired,
     #[error("Claude 文档超过 8 MiB 上限")]
     ClaudeDocumentTooLarge,
     #[error("Claude 文档必须是 UTF-8")]
     ClaudeDocumentNotUtf8,
+    #[error("请显式传入 --prompt-stdin，Prompt 不允许进入 argv")]
+    OpenCodePromptStdinRequired,
+    #[error("OpenCode 文档超过 8 MiB 上限")]
+    OpenCodeDocumentTooLarge,
+    #[error("OpenCode 文档必须是 UTF-8")]
+    OpenCodeDocumentNotUtf8,
     #[error("Chrome extension id 必须是 32 个 a-p 小写字符")]
     InvalidExtensionId,
     #[error("Native Host 不可执行: {0}")]

@@ -21,6 +21,7 @@ dependencies = [
  "agent-ferry-core",
  "agent-ferry-daemon",
  "agent-ferry-hermes",
+ "agent-ferry-opencode",
  "agent-ferry-protocol",
  "agent-ferry-transport",
  "clap",
@@ -89,6 +90,17 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "agent-ferry-opencode"
+version = "0.1.0"
+dependencies = [
+ "agent-ferry-core",
+ "serde",
+ "serde_json",
+ "thiserror",
  "uuid",
 ]
 

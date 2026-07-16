@@ -6,6 +6,7 @@ members = [
     "crates/agent-ferry-daemon",
     "crates/agent-ferry-host",
     "crates/agent-ferry-hermes",
+    "crates/agent-ferry-opencode",
     "crates/agent-ferry-protocol",
     "crates/agent-ferry-transport",
 ]
