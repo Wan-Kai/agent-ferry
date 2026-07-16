@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -12,6 +12,8 @@ use agent_ferry_core::AgentFerryPaths;
 use serde::{Deserialize, Serialize};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+pub const MAX_CLAUDE_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
+const ARTIFACT_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaudeBinding {
@@ -44,6 +46,32 @@ pub struct ClaudeDiagnosis {
 #[serde(rename_all = "camelCase")]
 struct AuthStatus {
     logged_in: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeDocument {
+    pub title: String,
+    pub source_url: String,
+    pub markdown: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeTaskEvent {
+    Started {
+        session_id: String,
+        artifact: PathBuf,
+    },
+    Output(String),
+    Diagnostic(String),
+    Completed(String),
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeTaskResult {
+    pub session_id: String,
+    pub artifact: PathBuf,
+    pub output: String,
 }
 
 #[must_use]
@@ -236,6 +264,213 @@ pub fn load_binding(paths: &AgentFerryPaths) -> Result<Option<ClaudeBinding>, Cl
     Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
+/// 在指定 Workspace 中启动全新的 unrestricted Claude Print Task。
+///
+/// Prompt 只通过 stdin 发送；正文只写入系统临时 Artifact，二者都不会进入 argv。
+///
+/// # Errors
+///
+/// 绑定不可用、Workspace/正文无效、进程启动失败、stream-json 无效或 Claude 非零退出时返回错误。
+pub fn run_print_task(
+    paths: &AgentFerryPaths,
+    workspace: &Path,
+    prompt: &str,
+    document: &ClaudeDocument,
+    mut emit: impl FnMut(ClaudeTaskEvent),
+) -> Result<ClaudeTaskResult, ClaudeError> {
+    if prompt.trim().is_empty() {
+        return Err(ClaudeError::EmptyPrompt);
+    }
+    if document.title.trim().is_empty()
+        || document.markdown.trim().is_empty()
+        || document.markdown.len() > MAX_CLAUDE_DOCUMENT_BYTES
+    {
+        return Err(ClaudeError::InvalidDocument);
+    }
+    let workspace = workspace.canonicalize()?;
+    if !workspace.is_dir() {
+        return Err(ClaudeError::WorkspaceNotDirectory(workspace));
+    }
+    let binding = load_binding(paths)?.ok_or(ClaudeError::BindingMissing)?;
+    let diagnosis = diagnose_executable(&binding.executable);
+    if diagnosis.state != ClaudeState::Ready {
+        return Err(ClaudeError::NotReady(diagnosis.detail));
+    }
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let artifact = create_artifact(&session_id, document)?;
+    emit(ClaudeTaskEvent::Started {
+        session_id: session_id.clone(),
+        artifact: artifact.clone(),
+    });
+    let task_prompt = format!(
+        "{prompt}\n\n完整来源内容位于以下只读交接 Artifact，请先读取后再完成任务：\n{}",
+        artifact.display()
+    );
+    let final_output = execute_print_process(
+        &binding.executable,
+        &workspace,
+        &session_id,
+        &task_prompt,
+        &mut emit,
+    )?;
+    emit(ClaudeTaskEvent::Completed(final_output.clone()));
+    Ok(ClaudeTaskResult {
+        session_id,
+        artifact,
+        output: final_output,
+    })
+}
+
+fn execute_print_process(
+    executable: &Path,
+    workspace: &Path,
+    session_id: &str,
+    task_prompt: &str,
+    emit: &mut impl FnMut(ClaudeTaskEvent),
+) -> Result<String, ClaudeError> {
+    let mut child = Command::new(executable)
+        .current_dir(workspace)
+        .args([
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--dangerously-skip-permissions",
+            "--session-id",
+            session_id,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or(ClaudeError::MissingPipe)?
+        .write_all(task_prompt.as_bytes())?;
+    let stderr = child.stderr.take().ok_or(ClaudeError::MissingPipe)?;
+    let stderr_task = thread::spawn(move || {
+        let mut text = String::new();
+        BufReader::new(stderr)
+            .read_to_string(&mut text)
+            .map(|_| text)
+    });
+    let stdout = child.stdout.take().ok_or(ClaudeError::MissingPipe)?;
+    let mut final_output = String::new();
+    let mut structured_error = None;
+    for line in BufReader::new(stdout).lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.into());
+            }
+        };
+        if line.len() > 1024 * 1024 {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ClaudeError::OutputLineTooLarge);
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.into());
+            }
+        };
+        if let Some(delta) = stream_text_delta(&value) {
+            final_output.push_str(delta);
+            emit(ClaudeTaskEvent::Output(delta.to_owned()));
+        } else if value.get("type").and_then(serde_json::Value::as_str) == Some("result") {
+            let result = value
+                .get("result")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Claude 返回了未说明原因的错误");
+            if value
+                .get("is_error")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                structured_error = Some(result.to_owned());
+            } else if final_output.is_empty() {
+                final_output.push_str(result);
+            }
+        }
+    }
+    let status = child.wait()?;
+    let stderr = stderr_task
+        .join()
+        .map_err(|_| ClaudeError::StderrReaderPanicked)??;
+    if !stderr.trim().is_empty() {
+        emit(ClaudeTaskEvent::Diagnostic(stderr.trim().to_owned()));
+    }
+    if !status.success() || structured_error.is_some() {
+        let detail = structured_error.unwrap_or_else(|| stderr.trim().to_owned());
+        let message = format!("Claude Code 退出码 {:?}: {detail}", status.code());
+        emit(ClaudeTaskEvent::Failed(message.clone()));
+        return Err(ClaudeError::TaskFailed(message));
+    }
+    Ok(final_output)
+}
+
+fn create_artifact(session_id: &str, document: &ClaudeDocument) -> Result<PathBuf, ClaudeError> {
+    let root = env::temp_dir().join("agent-ferry").join("artifacts");
+    fs::create_dir_all(&root)?;
+    fs::set_permissions(
+        root.parent().ok_or(ClaudeError::InvalidArtifactRoot)?,
+        fs::Permissions::from_mode(0o700),
+    )?;
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+    cleanup_expired_artifacts(&root);
+    let artifact = root.join(format!("{session_id}.md"));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    let mut file = options.open(&artifact)?;
+    write!(
+        file,
+        "# {}\n\n- 来源：{}\n- Agent Ferry Session：{}\n\n---\n\n{}",
+        document.title, document.source_url, session_id, document.markdown
+    )?;
+    file.sync_all()?;
+    Ok(artifact)
+}
+
+fn cleanup_expired_artifacts(root: &Path) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let expired = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= ARTIFACT_RETENTION);
+        if metadata.is_file() && expired {
+            // 只清理上一次已终结任务留下的老文件；本次 Artifact 尚未创建，不可能误删运行中输入。
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn stream_text_delta(value: &serde_json::Value) -> Option<&str> {
+    (value.get("type")?.as_str()? == "stream_event")
+        .then_some(())
+        .and_then(|()| value.get("event"))?
+        .get("delta")?
+        .get("text")?
+        .as_str()
+}
+
 fn save_binding(paths: &AgentFerryPaths, executable: &Path) -> Result<(), ClaudeError> {
     paths.ensure_private_config()?;
     let temporary = paths.claude_binding.with_extension("json.tmp");
@@ -307,6 +542,26 @@ pub enum ClaudeError {
     NotExecutable(PathBuf),
     #[error("Claude Code 诊断命令超过 5 秒")]
     CommandTimeout,
+    #[error("尚未绑定 Claude Code；请先运行 aferry agent claude detect")]
+    BindingMissing,
+    #[error("Claude Code 尚未 ready: {0}")]
+    NotReady(String),
+    #[error("Prompt 不能为空")]
+    EmptyPrompt,
+    #[error("文档标题、正文或大小无效")]
+    InvalidDocument,
+    #[error("Workspace 不是目录: {0}")]
+    WorkspaceNotDirectory(PathBuf),
+    #[error("无法创建系统临时 Artifact 根目录")]
+    InvalidArtifactRoot,
+    #[error("Claude Code 未提供所需 stdio 管道")]
+    MissingPipe,
+    #[error("Claude stream-json 单行超过 1 MiB")]
+    OutputLineTooLarge,
+    #[error("Claude stderr 读取线程异常退出")]
+    StderrReaderPanicked,
+    #[error("Claude Print Task 失败: {0}")]
+    TaskFailed(String),
     #[error("Claude Code 不兼容: {0}")]
     Incompatible(String),
     #[error(transparent)]
@@ -338,6 +593,31 @@ mod tests {
             ),
         )
         .expect("写入 fake Claude");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("设置执行权限");
+        path
+    }
+
+    fn fake_print_claude(root: &Path, exit_code: i32, structured_error: bool) -> PathBuf {
+        fs::create_dir_all(root).expect("创建 fake 目录");
+        let path = root.join("claude-print");
+        let cwd_log = root.join("cwd.log");
+        let args_log = root.join("args.log");
+        let stdin_log = root.join("stdin.log");
+        let result = if structured_error {
+            r#"{"type":"result","is_error":true,"result":"API Error: fake forbidden"}"#
+        } else {
+            r#"{"type":"result","result":"第一段第二段"}"#
+        };
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --version) echo '2.1.197 (Claude Code)'; exit 0 ;;\n  --help) echo '--print --output-format --permission-mode --dangerously-skip-permissions'; exit 0 ;;\n  auth) echo '{{\"loggedIn\":true}}'; exit 0 ;;\nesac\npwd > '{}'\nprintf '%s\\n' \"$@\" > '{}'\ncat > '{}'\nprintf '%s\\n' '{{\"type\":\"stream_event\",\"event\":{{\"delta\":{{\"text\":\"第一段\"}}}}}}'\nprintf '%s\\n' '{{\"type\":\"stream_event\",\"event\":{{\"delta\":{{\"text\":\"第二段\"}}}}}}'\nprintf '%s\\n' '{result}'\necho 'fake diagnostic' >&2\nexit {exit_code}\n",
+                cwd_log.display(),
+                args_log.display(),
+                stdin_log.display()
+            ),
+        )
+        .expect("写入 fake Print Claude");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("设置执行权限");
         path
     }
@@ -409,6 +689,114 @@ mod tests {
                 & 0o777,
             0o600
         );
+        fs::remove_dir_all(root).expect("清理测试目录");
+    }
+
+    #[test]
+    fn print_task_uses_fixed_cwd_structured_argv_stdin_and_temp_artifact() {
+        let root = temporary_root();
+        let executable = fake_print_claude(&root.join("fake"), 0, false);
+        let paths = AgentFerryPaths::from_root(root.join("ferry"));
+        bind(&paths, &executable).expect("绑定 fake Claude");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).expect("创建 Workspace");
+        let document = ClaudeDocument {
+            title: "完整文章".to_owned(),
+            source_url: "https://example.com/article".to_owned(),
+            markdown: "不可丢失的完整正文".repeat(200),
+        };
+        let mut events = Vec::new();
+        let result = run_print_task(
+            &paths,
+            &workspace,
+            "请分析文章并输出结论",
+            &document,
+            |event| events.push(event),
+        )
+        .expect("运行 Print Task");
+
+        assert_eq!(result.output, "第一段第二段");
+        assert!(result.artifact.starts_with(env::temp_dir()));
+        assert!(!result.artifact.starts_with(&workspace));
+        let artifact = fs::read_to_string(&result.artifact).expect("读取 Artifact");
+        assert!(artifact.contains("https://example.com/article"));
+        assert!(artifact.ends_with(&document.markdown));
+        assert_eq!(
+            fs::metadata(&result.artifact)
+                .expect("读取 Artifact 权限")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let fake_root = root.join("fake");
+        assert_eq!(
+            fs::read_to_string(fake_root.join("cwd.log"))
+                .expect("读取 cwd")
+                .trim(),
+            workspace
+                .canonicalize()
+                .expect("规范化 Workspace")
+                .to_string_lossy()
+        );
+        let args = fs::read_to_string(fake_root.join("args.log")).expect("读取 argv");
+        for required in [
+            "--print",
+            "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--dangerously-skip-permissions",
+            "--session-id",
+            &result.session_id,
+        ] {
+            assert!(args.lines().any(|argument| argument == required));
+        }
+        assert!(!args.contains("--bare"));
+        assert!(!args.contains("--no-session-persistence"));
+        assert!(!args.contains("请分析文章"));
+        assert!(!args.contains("不可丢失"));
+        let stdin = fs::read_to_string(fake_root.join("stdin.log")).expect("读取 stdin");
+        assert!(stdin.contains("请分析文章并输出结论"));
+        assert!(stdin.contains(result.artifact.to_string_lossy().as_ref()));
+        assert!(!stdin.contains("不可丢失的完整正文"));
+        assert!(matches!(
+            events.first(),
+            Some(ClaudeTaskEvent::Started { .. })
+        ));
+        assert!(matches!(events.last(), Some(ClaudeTaskEvent::Completed(_))));
+        assert!(events.iter().any(
+            |event| matches!(event, ClaudeTaskEvent::Diagnostic(text) if text == "fake diagnostic")
+        ));
+
+        let _ = fs::remove_file(result.artifact);
+        fs::remove_dir_all(root).expect("清理测试目录");
+    }
+
+    #[test]
+    fn print_task_surfaces_structured_result_error() {
+        let root = temporary_root();
+        let executable = fake_print_claude(&root.join("fake"), 0, true);
+        let paths = AgentFerryPaths::from_root(root.join("ferry"));
+        bind(&paths, &executable).expect("绑定 fake Claude");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).expect("创建 Workspace");
+        let mut events = Vec::new();
+        let error = run_print_task(
+            &paths,
+            &workspace,
+            "执行失败测试",
+            &ClaudeDocument {
+                title: "失败文档".to_owned(),
+                source_url: "https://example.com/failure".to_owned(),
+                markdown: "足够的失败测试正文".repeat(20),
+            },
+            |event| events.push(event),
+        )
+        .expect_err("结构化错误必须失败");
+        assert!(matches!(error, ClaudeError::TaskFailed(_)));
+        assert!(error.to_string().contains("API Error: fake forbidden"));
+        assert!(matches!(events.last(), Some(ClaudeTaskEvent::Failed(_))));
         fs::remove_dir_all(root).expect("清理测试目录");
     }
 }

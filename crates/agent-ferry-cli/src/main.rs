@@ -3,7 +3,9 @@ use std::io::{self, IsTerminal as _, Read, Write as _};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use agent_ferry_claude::{ClaudeDiagnosis, ClaudeState};
+use agent_ferry_claude::{
+    ClaudeDiagnosis, ClaudeDocument, ClaudeState, ClaudeTaskEvent, MAX_CLAUDE_DOCUMENT_BYTES,
+};
 use agent_ferry_core::{
     AgentFerryPaths, NativeHostManifest, open_ipc_stream, read_native_host_manifest,
     send_ipc_request,
@@ -72,6 +74,20 @@ enum ClaudeCommand {
     },
     /// 诊断已绑定路径、Print Mode flags 和认证状态
     Doctor(OutputArgs),
+    /// 在指定 Workspace 启动一个全新的 unrestricted Print Task
+    Run {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        document_file: PathBuf,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        source_url: String,
+        /// 从 stdin 读取 Prompt，避免进入 argv 和 shell history
+        #[arg(long)]
+        prompt_stdin: bool,
+    },
 }
 
 #[derive(Debug, Clone, Args)]
@@ -265,11 +281,78 @@ fn run_agent_command(command: AgentCommand) -> Result<i32, CliError> {
                 ClaudeCommand::Doctor(output) => {
                     (agent_ferry_claude::diagnose_binding(&paths)?, output)
                 }
+                ClaudeCommand::Run {
+                    workspace,
+                    document_file,
+                    title,
+                    source_url,
+                    prompt_stdin,
+                } => {
+                    return run_claude_task(
+                        &paths,
+                        &workspace,
+                        &document_file,
+                        title,
+                        source_url,
+                        prompt_stdin,
+                    );
+                }
             };
             print_claude_diagnosis(&diagnosis, output.json)?;
             Ok(i32::from(diagnosis.state != ClaudeState::Ready))
         }
     }
+}
+
+fn run_claude_task(
+    paths: &AgentFerryPaths,
+    workspace: &Path,
+    document_file: &Path,
+    title: String,
+    source_url: String,
+    prompt_stdin: bool,
+) -> Result<i32, CliError> {
+    if !prompt_stdin {
+        return Err(CliError::ClaudePromptStdinRequired);
+    }
+    let prompt = read_limited_input(io::stdin().lock())?;
+    let markdown = read_limited_utf8_file(document_file, MAX_CLAUDE_DOCUMENT_BYTES)?;
+    let document = ClaudeDocument {
+        title,
+        source_url,
+        markdown,
+    };
+    agent_ferry_claude::run_print_task(
+        paths,
+        workspace,
+        &prompt,
+        &document,
+        |event| match event {
+            ClaudeTaskEvent::Started {
+                session_id,
+                artifact,
+            } => {
+                println!("Claude Task 已启动: {session_id}");
+                println!("Artifact: {}", artifact.display());
+            }
+            ClaudeTaskEvent::Output(text) => print!("{text}"),
+            ClaudeTaskEvent::Diagnostic(text) => eprintln!("[claude] {text}"),
+            ClaudeTaskEvent::Completed(_) => println!("\nClaude Task 已完成"),
+            ClaudeTaskEvent::Failed(text) => eprintln!("Claude Task 失败: {text}"),
+        },
+    )?;
+    Ok(0)
+}
+
+fn read_limited_utf8_file(path: &Path, limit: usize) -> Result<String, CliError> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(u64::try_from(limit).unwrap_or(u64::MAX) + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(CliError::ClaudeDocumentTooLarge);
+    }
+    String::from_utf8(bytes).map_err(|_| CliError::ClaudeDocumentNotUtf8)
 }
 
 fn print_claude_diagnosis(diagnosis: &ClaudeDiagnosis, json: bool) -> Result<(), CliError> {
@@ -980,6 +1063,12 @@ enum CliError {
     Hermes(#[from] agent_ferry_hermes::HermesError),
     #[error(transparent)]
     Claude(#[from] agent_ferry_claude::ClaudeError),
+    #[error("请显式传入 --prompt-stdin，Prompt 不允许进入 argv")]
+    ClaudePromptStdinRequired,
+    #[error("Claude 文档超过 8 MiB 上限")]
+    ClaudeDocumentTooLarge,
+    #[error("Claude 文档必须是 UTF-8")]
+    ClaudeDocumentNotUtf8,
     #[error("Chrome extension id 必须是 32 个 a-p 小写字符")]
     InvalidExtensionId,
     #[error("Native Host 不可执行: {0}")]
