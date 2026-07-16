@@ -1,11 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import ReactDOM from "react-dom/client";
 import type { CapturedPage } from "../extract-page.content";
+import {
+  DEFAULT_PROMPT,
+  EMPTY_PROMPT_TEMPLATE_SETTINGS,
+  deleteTemplate,
+  effectivePrompt,
+  loadPromptTemplateSettings,
+  persistPromptTemplateSettings,
+  saveTemplate,
+  type PromptTemplateSettings,
+} from "../../lib/prompt-templates";
 import "./style.css";
 
 const NATIVE_HOST_NAME = "com.agentferry.host";
 const PROTOCOL_VERSION = 1;
-const DEFAULT_PROMPT = "请分析这篇内容，提炼核心观点、关键证据和可执行的启发，并将值得长期保留的信息自行沉淀到你的文档或记忆中。";
 
 type HandoffTargetStatus = {
   id: string;
@@ -39,6 +48,7 @@ type ConnectionState =
   | { kind: "ready"; result: StatusResult }
   | { kind: "unavailable"; detail: string };
 type RunState = { kind: "idle" } | { kind: "capturing" } | { kind: "running" | "done" | "failed"; label: string; output: string };
+type TemplateDraft = { id?: string; name: string; content: string };
 type ChromeScriptingApi = {
   scripting: {
     executeScript(options: { target: { tabId: number }; files: string[] }): Promise<Array<{ result?: unknown }>>;
@@ -63,6 +73,9 @@ function App() {
   const [selectedTarget, setSelectedTarget] = useState("");
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [run, setRun] = useState<RunState>({ kind: "idle" });
+  const [templateSettings, setTemplateSettings] = useState<PromptTemplateSettings>(EMPTY_PROMPT_TEMPLATE_SETTINGS);
+  const [templateDraft, setTemplateDraft] = useState<TemplateDraft | null>(null);
+  const [templateError, setTemplateError] = useState("");
 
   const readyTargets = useMemo(
     () => connection.kind === "ready" ? (connection.result.targets ?? []).filter((target) => target.state === "ready") : [],
@@ -94,6 +107,56 @@ function App() {
   }, []);
 
   useEffect(() => { void checkConnection(); }, [checkConnection]);
+  useEffect(() => {
+    void loadPromptTemplateSettings(browser.storage.local)
+      .then((settings) => {
+        setTemplateSettings(settings);
+        setPrompt(effectivePrompt(settings));
+      })
+      .catch((error: unknown) => setTemplateError(`无法读取模板：${error instanceof Error ? error.message : String(error)}`));
+  }, []);
+
+  const selectTemplate = useCallback(async (id: string) => {
+    const next = { ...templateSettings, selected_template_id: id || null };
+    setTemplateSettings(next);
+    setPrompt(effectivePrompt(next));
+    setTemplateDraft(null);
+    setTemplateError("");
+    try {
+      await persistPromptTemplateSettings(browser.storage.local, next);
+    } catch (error) {
+      setTemplateError(`无法保存模板选择：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [templateSettings]);
+
+  const commitTemplate = useCallback(async () => {
+    if (!templateDraft) return;
+    try {
+      const next = saveTemplate(templateSettings, templateDraft, crypto.randomUUID());
+      await persistPromptTemplateSettings(browser.storage.local, next);
+      setTemplateSettings(next);
+      if (templateDraft.id === next.selected_template_id) setPrompt(effectivePrompt(next));
+      setTemplateDraft(null);
+      setTemplateError("");
+    } catch (error) {
+      setTemplateError(error instanceof Error ? error.message : String(error));
+    }
+  }, [templateDraft, templateSettings]);
+
+  const removeSelectedTemplate = useCallback(async () => {
+    const id = templateSettings.selected_template_id;
+    if (!id) return;
+    const next = deleteTemplate(templateSettings, id);
+    try {
+      await persistPromptTemplateSettings(browser.storage.local, next);
+      setTemplateSettings(next);
+      setPrompt(DEFAULT_PROMPT);
+      setTemplateDraft(null);
+      setTemplateError("");
+    } catch (error) {
+      setTemplateError(`无法删除模板：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [templateSettings]);
 
   const startHandoff = useCallback(async () => {
     if (!selectedTarget || !prompt.trim()) return;
@@ -141,7 +204,7 @@ function App() {
       port.postMessage({
         protocol_version: PROTOCOL_VERSION,
         request_id: requestId,
-        command: { type: "handoff", task_id: taskId, target_id: selectedTarget, prompt: prompt.trim(), source },
+        command: { type: "handoff", task_id: taskId, target_id: selectedTarget, prompt, source },
       });
     } catch (error) {
       setRun({ kind: "failed", label: error instanceof Error ? error.message : String(error), output: "" });
@@ -153,7 +216,23 @@ function App() {
       <header><div className="mark" aria-hidden="true">AF</div><div><p className="eyebrow">AGENT FERRY</p><h1>交给你的 Agent</h1></div></header>
       <section className={`status status-${connection.kind}`} aria-live="polite"><span className="status-dot" /><div><p className="status-title">{connection.kind === "checking" ? "正在检查本地连接" : connection.kind === "ready" ? "本地通路已就绪" : "暂时无法连接"}</p><p className="status-detail">{connection.kind === "checking" ? "Chrome → Native Host → agentferryd" : connection.kind === "ready" ? `Agent Ferry ${connection.result.core_version}` : connection.detail}</p></div></section>
       {connection.kind === "ready" && <section className="targets" aria-label="可用目标"><div className="section-heading"><p>REMOTE HERMES</p><span>{connection.result.targets?.length ?? 0}</span></div>{(connection.result.targets?.length ?? 0) === 0 ? <div className="empty-target"><p>尚未配置远程目标</p><code>aferry connection add hermes</code></div> : connection.result.targets?.map((target) => <label className={`target ${target.state !== "ready" ? "target-disabled" : ""}`} key={target.id}><input type="radio" name="target" value={target.id} checked={selectedTarget === target.id} disabled={target.state !== "ready"} onChange={() => setSelectedTarget(target.id)} /><span className={`target-dot target-${target.state}`} /><div><p className="target-name">{target.name}</p><p className="target-detail">{targetStateLabel(target.state)}{target.state === "ready" && target.capabilities.includes("run.events_sse") ? " · 实时输出" : ""}</p></div></label>)}</section>}
-      {connection.kind === "ready" && <label className="prompt-label">交接指令<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={4} /></label>}
+      {connection.kind === "ready" && <section className="prompt-section">
+        <div className="template-row">
+          <label>Prompt 模板<select value={templateSettings.selected_template_id ?? ""} onChange={(event) => void selectTemplate(event.target.value)}><option value="">默认 Prompt</option>{templateSettings.templates.map((template) => <option value={template.id} key={template.id}>{template.name}</option>)}</select></label>
+          <div className="template-actions">
+            <button className="text-button" type="button" onClick={() => { setTemplateDraft({ name: "", content: prompt }); setTemplateError(""); }}>新建</button>
+            <button className="text-button" type="button" disabled={!templateSettings.selected_template_id} onClick={() => { const selected = templateSettings.templates.find((template) => template.id === templateSettings.selected_template_id); if (selected) setTemplateDraft({ ...selected }); }}>编辑</button>
+            <button className="text-button danger" type="button" disabled={!templateSettings.selected_template_id} onClick={() => void removeSelectedTemplate()}>删除</button>
+          </div>
+        </div>
+        {templateDraft && <div className="template-editor">
+          <label>模板名称<input value={templateDraft.name} maxLength={80} onChange={(event) => setTemplateDraft({ ...templateDraft, name: event.target.value })} /></label>
+          <label>模板内容<textarea value={templateDraft.content} rows={3} onChange={(event) => setTemplateDraft({ ...templateDraft, content: event.target.value })} /></label>
+          <div className="editor-actions"><button className="text-button" type="button" onClick={() => setTemplateDraft(null)}>取消</button><button className="small-primary" type="button" onClick={() => void commitTemplate()}>保存模板</button></div>
+        </div>}
+        {templateError && <p className="template-error" role="alert">{templateError}</p>}
+        <label className="prompt-label">最终 Prompt（将原样发送）<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={4} /></label>
+      </section>}
       {connection.kind === "unavailable" && <button className="secondary" type="button" onClick={() => void checkConnection()}>重新检查</button>}
       <button className="primary" type="button" disabled={connection.kind !== "ready" || readyTargets.length === 0 || !selectedTarget || !prompt.trim() || run.kind === "capturing" || run.kind === "running"} onClick={() => void startHandoff()}>{run.kind === "capturing" ? "正在提取页面…" : run.kind === "running" ? "Hermes 正在处理…" : "发送当前页面"}</button>
       {run.kind !== "idle" && run.kind !== "capturing" && <section className={`run run-${run.kind}`} aria-live="polite"><p className="run-label">{run.label}</p>{run.output && <pre>{run.output}</pre>}</section>}

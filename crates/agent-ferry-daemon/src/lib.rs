@@ -493,8 +493,7 @@ async fn stream_handoff(
 
 /// 形成唯一传给 Hermes 的 input，确保用户可见 prompt、来源元数据和正文不被拆散。
 fn compose_handoff_input(prompt: &str, source: &SourceDocument) -> Result<String, String> {
-    let prompt = prompt.trim();
-    if prompt.is_empty() || prompt.len() > 16 * 1024 {
+    if prompt.trim().is_empty() || prompt.len() > 16 * 1024 {
         return Err("Prompt 不能为空且不得超过 16 KiB".to_owned());
     }
     if task_source_invalid(source) {
@@ -654,8 +653,8 @@ mod tests {
             markdown: markdown.clone(),
             word_count: 100,
         };
-        let input = compose_handoff_input("请分析", &source).expect("形成 input");
-        assert!(input.starts_with("请分析"));
+        let input = compose_handoff_input("  请分析\n", &source).expect("形成 input");
+        assert!(input.starts_with("  请分析\n\n\n---"));
         assert!(input.contains("来源 URL: https://example.com/article"));
         assert!(input.ends_with(&markdown));
     }

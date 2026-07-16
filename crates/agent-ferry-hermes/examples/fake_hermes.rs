@@ -20,21 +20,27 @@ const CAPABILITIES: &str = r#"{
 async fn main() -> std::io::Result<()> {
     let address = env::var("FAKE_HERMES_ADDR").unwrap_or_else(|_| "127.0.0.1:18642".to_owned());
     let expected_token = env::var("FAKE_HERMES_TOKEN").unwrap_or_else(|_| "e2e-token".to_owned());
+    let expected_prompt = env::var("FAKE_HERMES_EXPECT_PROMPT").ok();
     let listener = TcpListener::bind(&address).await?;
     eprintln!("fake-hermes listening address={address}");
 
     loop {
         let (stream, peer) = listener.accept().await?;
         let token = expected_token.clone();
+        let prompt = expected_prompt.clone();
         tokio::spawn(async move {
-            if let Err(error) = serve(stream, &token).await {
+            if let Err(error) = serve(stream, &token, prompt.as_deref()).await {
                 eprintln!("fake-hermes request_failed peer={peer} error={error}");
             }
         });
     }
 }
 
-async fn serve(mut stream: TcpStream, expected_token: &str) -> std::io::Result<()> {
+async fn serve(
+    mut stream: TcpStream,
+    expected_token: &str,
+    expected_prompt: Option<&str>,
+) -> std::io::Result<()> {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 1024];
     loop {
@@ -65,6 +71,13 @@ async fn serve(mut stream: TcpStream, expected_token: &str) -> std::io::Result<(
     let authorized = request
         .lines()
         .any(|line| line.eq_ignore_ascii_case(&format!("authorization: Bearer {expected_token}")));
+    let prompt_matches = expected_prompt.map(|expected| {
+        let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+        serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| value.get("input")?.as_str().map(ToOwned::to_owned))
+            .is_some_and(|input| input.starts_with(&format!("{expected}\n\n---")))
+    });
     let (status, content_type, body) = if first_line == "GET /v1/capabilities HTTP/1.1"
         && authorized
     {
@@ -100,7 +113,9 @@ async fn serve(mut stream: TcpStream, expected_token: &str) -> std::io::Result<(
     };
 
     // 日志只保留请求行与鉴权结果，确保端到端验证本身不会把测试 token 写入日志。
-    eprintln!("fake-hermes request line={first_line:?} authorized={authorized}");
+    eprintln!(
+        "fake-hermes request line={first_line:?} authorized={authorized} prompt_matches={prompt_matches:?}"
+    );
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
