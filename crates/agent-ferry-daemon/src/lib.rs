@@ -9,14 +9,15 @@ use std::time::Duration;
 
 use agent_ferry_core::{AgentFerryPaths, load_or_create_connector_token};
 use agent_ferry_hermes::{
-    DiagnosisState, HermesClient, HermesConnection, KeychainCredentialStore, add_connection,
-    load_connections, remove_connection,
+    CredentialStore, DiagnosisState, HermesClient, HermesConnection, KeychainCredentialStore,
+    add_connection, load_connections, remove_connection,
 };
 use agent_ferry_protocol::{
-    Command, ConnectorKind, ErrorCode, HandoffTargetKind, HandoffTargetState, HandoffTargetStatus,
-    HostRequest, HostResponse, IpcEnvelope, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, ServiceState,
-    StatusResult,
+    Command, ConnectorKind, ErrorCode, HandoffEvent, HandoffTargetKind, HandoffTargetState,
+    HandoffTargetStatus, HostRequest, HostResponse, IpcEnvelope, MAX_MESSAGE_BYTES,
+    PROTOCOL_VERSION, ServiceState, SourceDocument, StatusResult,
 };
+use serde::Serialize;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -167,8 +168,46 @@ async fn handle_connection(
     if envelope.connector == ConnectorKind::ChromeNativeHost {
         chrome_seen.store(true, Ordering::Release);
     }
+    let request = match decode_request(envelope.request) {
+        Ok(request) => request,
+        Err(response) => {
+            write_async_json(&mut stream, &response).await?;
+            return Ok(());
+        }
+    };
+    info!(
+        request_id = request.request_id,
+        connector = ?envelope.connector,
+        command = request.command.name(),
+        "处理本地 Connector 请求"
+    );
+    if let Command::Handoff {
+        task_id,
+        target_id,
+        prompt,
+        source,
+    } = request.command
+    {
+        return stream_handoff(
+            &mut stream,
+            request.request_id,
+            task_id,
+            target_id,
+            prompt,
+            source,
+            &envelope.connector,
+            paths,
+            hermes_client,
+        )
+        .await;
+    }
+
     let response = dispatch_request(
-        envelope.request,
+        HostRequest {
+            protocol_version: request.protocol_version,
+            request_id: request.request_id,
+            command: request.command,
+        },
         &envelope.connector,
         chrome_seen,
         paths,
@@ -179,23 +218,12 @@ async fn handle_connection(
 }
 
 async fn dispatch_request(
-    value: Value,
+    request: HostRequest,
     connector: &ConnectorKind,
     chrome_seen: &AtomicBool,
     paths: &AgentFerryPaths,
     hermes_client: &HermesClient,
 ) -> HostResponse {
-    let request = match decode_request(value) {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
-
-    info!(
-        request_id = request.request_id,
-        connector = ?connector,
-        command = request.command.name(),
-        "处理本地 Connector 请求"
-    );
     match request.command {
         Command::Status => {
             status_response(
@@ -273,6 +301,12 @@ async fn dispatch_request(
             )
             .await
         }
+        Command::Handoff { .. } => HostResponse::failure(
+            request.request_id,
+            ErrorCode::Internal,
+            "Handoff 未进入流式处理路径",
+            false,
+        ),
     }
 }
 
@@ -301,7 +335,7 @@ fn decode_request(value: Value) -> Result<HostRequest, HostResponse> {
         .and_then(Value::as_str);
     if !matches!(
         command_type,
-        Some("status" | "connection_add" | "connection_remove")
+        Some("status" | "connection_add" | "connection_remove" | "handoff")
     ) {
         return Err(HostResponse::failure(
             &request_id,
@@ -319,6 +353,176 @@ fn decode_request(value: Value) -> Result<HostRequest, HostResponse> {
             false,
         )
     })
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn stream_handoff(
+    stream: &mut UnixStream,
+    request_id: String,
+    task_id: String,
+    target_id: String,
+    prompt: String,
+    source: SourceDocument,
+    connector: &ConnectorKind,
+    paths: &AgentFerryPaths,
+    hermes_client: &HermesClient,
+) -> io::Result<()> {
+    if *connector != ConnectorKind::ChromeNativeHost {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(
+                request_id,
+                ErrorCode::PermissionDenied,
+                "只有浏览器 Connector 可以提交页面交接",
+                false,
+            ),
+        )
+        .await;
+    }
+    if task_id.trim().is_empty() || task_id.len() > 128 {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(
+                request_id,
+                ErrorCode::InvalidMessage,
+                "task_id 不能为空且不得超过 128 字节",
+                false,
+            ),
+        )
+        .await;
+    }
+    let input = match compose_handoff_input(&prompt, &source) {
+        Ok(input) => input,
+        Err(message) => {
+            return write_async_json(
+                stream,
+                &HostResponse::failure(request_id, ErrorCode::InvalidMessage, message, false),
+            )
+            .await;
+        }
+    };
+    let connections = match load_connections(&paths.hermes_connections) {
+        Ok(connections) => connections,
+        Err(error) => {
+            return write_async_json(
+                stream,
+                &HostResponse::failure(request_id, ErrorCode::Internal, error.to_string(), false),
+            )
+            .await;
+        }
+    };
+    let Some(connection) = connections
+        .connections
+        .into_iter()
+        .find(|candidate| candidate.id == target_id)
+    else {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(
+                request_id,
+                ErrorCode::InvalidMessage,
+                "目标 Hermes Connection 不存在",
+                false,
+            ),
+        )
+        .await;
+    };
+    let Some(token) = KeychainCredentialStore
+        .get(&connection.credential_ref)
+        .map_err(io::Error::other)?
+    else {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(
+                request_id,
+                ErrorCode::PermissionDenied,
+                "目标 Hermes 的 Keychain 凭据不存在",
+                false,
+            ),
+        )
+        .await;
+    };
+    let diagnosis = hermes_client
+        .diagnose(&connection, &token)
+        .await
+        .map_err(io::Error::other)?;
+    if diagnosis.state != DiagnosisState::Ready {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(
+                request_id,
+                ErrorCode::DaemonUnavailable,
+                diagnosis.detail,
+                true,
+            ),
+        )
+        .await;
+    }
+    let use_sse = diagnosis
+        .capabilities
+        .iter()
+        .any(|capability| capability == "run.events_sse");
+    let mut updates = hermes_client.run(connection, token, input, use_sse);
+    let mut sequence = 0_u64;
+    while let Some(update) = updates.recv().await {
+        info!(
+            task_id,
+            target_id,
+            sequence,
+            event = ?update.kind,
+            "转发 Hermes Run 事件"
+        );
+        let event = HandoffEvent {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: request_id.clone(),
+            task_id: task_id.clone(),
+            sequence,
+            event: update.kind,
+            run_id: update.run_id,
+            text: update.text,
+        };
+        if write_async_json(stream, &event).await.is_err() {
+            // 弹窗关闭只中断本地观察；Hermes Run 已经由远端托管，不执行 stop。
+            info!(task_id, "浏览器观察者已离开，远端 Run 继续执行");
+            break;
+        }
+        sequence = sequence.saturating_add(1);
+    }
+    Ok(())
+}
+
+/// 形成唯一传给 Hermes 的 input，确保用户可见 prompt、来源元数据和正文不被拆散。
+fn compose_handoff_input(prompt: &str, source: &SourceDocument) -> Result<String, String> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() || prompt.len() > 16 * 1024 {
+        return Err("Prompt 不能为空且不得超过 16 KiB".to_owned());
+    }
+    if task_source_invalid(source) {
+        return Err("页面正文为空、明显不完整或来源元数据无效，请等待页面加载后重试".to_owned());
+    }
+    Ok(format!(
+        "{prompt}\n\n---\n来源 URL: {}\n标题: {}\n作者: {}\n发布日期: {}\n站点: {}\n提取器: {}\n字数: {}\n---\n\n{}",
+        source.url,
+        source.title,
+        source.author.as_deref().unwrap_or("未知"),
+        source.published.as_deref().unwrap_or("未知"),
+        source.site.as_deref().unwrap_or("未知"),
+        source.extractor,
+        source.word_count,
+        source.markdown
+    ))
+}
+
+fn task_source_invalid(source: &SourceDocument) -> bool {
+    let valid_url = url::Url::parse(&source.url)
+        .ok()
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https"));
+    !valid_url
+        || source.title.trim().is_empty()
+        || source.extractor != "defuddle"
+        || source.markdown.trim().len() < 200
+        || source.word_count < 40
+        || source.markdown.len() > 800 * 1024
 }
 
 async fn status_response(
@@ -346,7 +550,7 @@ async fn status_response(
             } else {
                 ServiceState::NotDetected
             },
-            capabilities: vec!["target.read".to_owned()],
+            capabilities: vec!["target.read".to_owned(), "handoff.submit".to_owned()],
             targets,
         },
     )
@@ -418,12 +622,11 @@ async fn read_async_frame(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
     Ok(payload)
 }
 
-async fn write_async_json(stream: &mut UnixStream, response: &HostResponse) -> io::Result<()> {
+async fn write_async_json<T: Serialize>(stream: &mut UnixStream, response: &T) -> io::Result<()> {
     let payload = serde_json::to_vec(response).map_err(io::Error::other)?;
     let length = u32::try_from(payload.len()).map_err(io::Error::other)?;
     stream.write_u32_le(length).await?;
-    stream.write_all(&payload).await?;
-    stream.shutdown().await
+    stream.write_all(&payload).await
 }
 
 fn frame_error_code(error: &io::Error) -> ErrorCode {
@@ -431,5 +634,44 @@ fn frame_error_code(error: &io::Error) -> ErrorCode {
         ErrorCode::MessageTooLarge
     } else {
         ErrorCode::InvalidMessage
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handoff_input_contains_visible_prompt_metadata_and_full_markdown() {
+        let markdown = format!("# 正文\n\n{}", "这是用于验证完整交接的内容。".repeat(50));
+        let source = SourceDocument {
+            url: "https://example.com/article".to_owned(),
+            title: "测试文章".to_owned(),
+            author: Some("作者".to_owned()),
+            published: Some("2026-07-16".to_owned()),
+            site: Some("示例站点".to_owned()),
+            extractor: "defuddle".to_owned(),
+            markdown: markdown.clone(),
+            word_count: 100,
+        };
+        let input = compose_handoff_input("请分析", &source).expect("形成 input");
+        assert!(input.starts_with("请分析"));
+        assert!(input.contains("来源 URL: https://example.com/article"));
+        assert!(input.ends_with(&markdown));
+    }
+
+    #[test]
+    fn handoff_rejects_url_only_or_obviously_short_capture() {
+        let source = SourceDocument {
+            url: "https://example.com".to_owned(),
+            title: "短页面".to_owned(),
+            author: None,
+            published: None,
+            site: None,
+            extractor: "defuddle".to_owned(),
+            markdown: "只有链接".to_owned(),
+            word_count: 2,
+        };
+        assert!(compose_handoff_input("分析", &source).is_err());
     }
 }

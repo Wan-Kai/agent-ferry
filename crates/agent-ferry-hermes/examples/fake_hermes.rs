@@ -43,8 +43,20 @@ async fn serve(mut stream: TcpStream, expected_token: &str) -> std::io::Result<(
             break;
         }
         request.extend_from_slice(&buffer[..read]);
-        if request.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
+        if let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                break;
+            }
         }
     }
 
@@ -53,18 +65,44 @@ async fn serve(mut stream: TcpStream, expected_token: &str) -> std::io::Result<(
     let authorized = request
         .lines()
         .any(|line| line.eq_ignore_ascii_case(&format!("authorization: Bearer {expected_token}")));
-    let (status, body) = if first_line == "GET /v1/capabilities HTTP/1.1" && authorized {
-        ("200 OK", CAPABILITIES)
+    let (status, content_type, body) = if first_line == "GET /v1/capabilities HTTP/1.1"
+        && authorized
+    {
+        ("200 OK", "application/json", CAPABILITIES)
+    } else if first_line == "POST /v1/runs HTTP/1.1" && authorized {
+        (
+            "202 Accepted",
+            "application/json",
+            r#"{"run_id":"run-browser-e2e","status":"started"}"#,
+        )
+    } else if first_line == "GET /v1/runs/run-browser-e2e/events HTTP/1.1" && authorized {
+        (
+            "200 OK",
+            "text/event-stream",
+            concat!(
+                "data: {\"type\":\"run.started\"}\n\n",
+                "data: {\"type\":\"message.delta\",\"delta\":\"已收到完整页面，正在分析。\"}\n\n",
+                "data: {\"type\":\"run.completed\",\"output\":\"Chrome 端到端交接完成：正文与可见 Prompt 已进入 Hermes Run。\"}\n\n"
+            ),
+        )
     } else if !authorized {
-        ("401 Unauthorized", r#"{"error":"unauthorized"}"#)
+        (
+            "401 Unauthorized",
+            "application/json",
+            r#"{"error":"unauthorized"}"#,
+        )
     } else {
-        ("404 Not Found", r#"{"error":"not_found"}"#)
+        (
+            "404 Not Found",
+            "application/json",
+            r#"{"error":"not_found"}"#,
+        )
     };
 
     // 日志只保留请求行与鉴权结果，确保端到端验证本身不会把测试 token 写入日志。
     eprintln!("fake-hermes request line={first_line:?} authorized={authorized}");
     let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(response.as_bytes()).await

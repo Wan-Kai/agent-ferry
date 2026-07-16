@@ -5,8 +5,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use agent_ferry_core::AgentFerryPaths;
+use agent_ferry_protocol::HandoffEventKind;
+use futures_util::StreamExt as _;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tokio::sync::mpsc;
 use url::Url;
 use uuid::Uuid;
 
@@ -140,6 +144,11 @@ impl HermesConnection {
     fn capabilities_url(&self) -> Result<Url, HermesError> {
         let base = self.endpoint.base_url.as_str().trim_end_matches('/');
         Url::parse(&format!("{base}/v1/capabilities")).map_err(HermesError::InvalidUrl)
+    }
+
+    fn api_url(&self, path: &str) -> Result<Url, HermesError> {
+        let base = self.endpoint.base_url.as_str().trim_end_matches('/');
+        Url::parse(&format!("{base}{path}")).map_err(HermesError::InvalidUrl)
     }
 }
 
@@ -318,6 +327,14 @@ pub fn remove_connection<S: CredentialStore>(
 #[derive(Debug, Clone)]
 pub struct HermesClient {
     client: Client,
+    request_timeout: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HermesRunUpdate {
+    pub run_id: Option<String>,
+    pub kind: HandoffEventKind,
+    pub text: Option<String>,
 }
 
 impl HermesClient {
@@ -328,12 +345,16 @@ impl HermesClient {
     /// TLS 或 HTTP client 初始化失败时返回错误。
     pub fn new(timeout: Duration) -> Result<Self, HermesError> {
         let client = Client::builder()
-            .timeout(timeout)
+            .connect_timeout(timeout)
+            // SSE 可能承载长时任务，不能设置 read/total timeout；普通 API 在请求级单独限时。
             // Bearer Token 不能跟随服务端重定向到另一个 origin；用户应配置最终 URL。
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(HermesError::HttpClient)?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            request_timeout: timeout,
+        })
     }
 
     /// 使用给定凭据发现服务器能力并返回可操作诊断。
@@ -351,6 +372,7 @@ impl HermesClient {
             .client
             .get(connection.capabilities_url()?)
             .bearer_auth(token)
+            .timeout(self.request_timeout)
             .send()
             .await;
         let response = match response {
@@ -443,6 +465,221 @@ impl HermesClient {
         };
         self.diagnose(connection, &token).await
     }
+
+    /// 提交一个 Hermes Run，并通过有界 channel 交付实时事件。
+    ///
+    /// receiver 被关闭只代表观察者离开；远端 Run 已经由 Hermes 接管，绝不能据此调用 stop。
+    #[must_use]
+    pub fn run(
+        &self,
+        connection: HermesConnection,
+        token: Vec<u8>,
+        input: String,
+        use_sse: bool,
+    ) -> mpsc::Receiver<HermesRunUpdate> {
+        let client = self.clone();
+        let (sender, receiver) = mpsc::channel(64);
+        tokio::spawn(async move {
+            let result = client
+                .observe_run(&connection, &token, &input, use_sse, &sender)
+                .await;
+            if let Err(error) = result {
+                let _ = sender
+                    .send(HermesRunUpdate {
+                        run_id: None,
+                        kind: HandoffEventKind::Failed,
+                        text: Some(error.to_string()),
+                    })
+                    .await;
+            }
+        });
+        receiver
+    }
+
+    async fn observe_run(
+        &self,
+        connection: &HermesConnection,
+        token: &[u8],
+        input: &str,
+        use_sse: bool,
+        sender: &mpsc::Sender<HermesRunUpdate>,
+    ) -> Result<(), HermesError> {
+        let token = std::str::from_utf8(token).map_err(|_| HermesError::CredentialNotUtf8)?;
+        let mut body = serde_json::json!({ "input": input });
+        if let Some(model) = &connection.endpoint.model {
+            body["model"] = Value::String(model.clone());
+        }
+        let response = self
+            .client
+            .post(connection.api_url("/v1/runs")?)
+            .bearer_auth(token)
+            .timeout(self.request_timeout)
+            .json(&body)
+            .send()
+            .await
+            .map_err(HermesError::RunTransport)?;
+        if !response.status().is_success() {
+            return Err(HermesError::RunHttp(response.status().as_u16()));
+        }
+        let submission: RunSubmission = response.json().await.map_err(HermesError::RunTransport)?;
+        if sender
+            .send(HermesRunUpdate {
+                run_id: Some(submission.run_id.clone()),
+                kind: HandoffEventKind::Submitted,
+                text: None,
+            })
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+        if use_sse {
+            self.observe_sse(connection, token, &submission.run_id, sender)
+                .await
+        } else {
+            self.observe_polling(connection, token, &submission.run_id, sender)
+                .await
+        }
+    }
+
+    async fn observe_sse(
+        &self,
+        connection: &HermesConnection,
+        token: &str,
+        run_id: &str,
+        sender: &mpsc::Sender<HermesRunUpdate>,
+    ) -> Result<(), HermesError> {
+        let response = self
+            .client
+            .get(connection.api_url(&format!("/v1/runs/{run_id}/events"))?)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(HermesError::RunTransport)?;
+        if !response.status().is_success() {
+            return Err(HermesError::RunHttp(response.status().as_u16()));
+        }
+        let mut bytes = response.bytes_stream();
+        let mut buffer = Vec::new();
+        while let Some(chunk) = bytes.next().await {
+            buffer.extend_from_slice(&chunk.map_err(HermesError::RunTransport)?);
+            if buffer.len() > 256 * 1024 {
+                return Err(HermesError::RunEventTooLarge);
+            }
+            while let Some((end, consumed)) = sse_boundary(&buffer) {
+                let block = String::from_utf8_lossy(&buffer[..end]).replace("\r\n", "\n");
+                buffer.drain(..consumed);
+                let data = block
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("data:"))
+                    .map(str::trim_start)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if data.is_empty() {
+                    continue;
+                }
+                let value: Value = serde_json::from_str(&data)?;
+                if let Some(update) = run_event_update(run_id, &value) {
+                    let terminal = matches!(
+                        update.kind,
+                        HandoffEventKind::Completed
+                            | HandoffEventKind::Failed
+                            | HandoffEventKind::Cancelled
+                    );
+                    if sender.send(update).await.is_err() || terminal {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Err(HermesError::RunEndedUnexpectedly)
+    }
+
+    async fn observe_polling(
+        &self,
+        connection: &HermesConnection,
+        token: &str,
+        run_id: &str,
+        sender: &mpsc::Sender<HermesRunUpdate>,
+    ) -> Result<(), HermesError> {
+        loop {
+            let response = self
+                .client
+                .get(connection.api_url(&format!("/v1/runs/{run_id}"))?)
+                .bearer_auth(token)
+                .timeout(self.request_timeout)
+                .send()
+                .await
+                .map_err(HermesError::RunTransport)?;
+            if !response.status().is_success() {
+                return Err(HermesError::RunHttp(response.status().as_u16()));
+            }
+            let value: Value = response.json().await.map_err(HermesError::RunTransport)?;
+            if let Some(update) = run_status_update(run_id, &value) {
+                let terminal = matches!(
+                    update.kind,
+                    HandoffEventKind::Completed
+                        | HandoffEventKind::Failed
+                        | HandoffEventKind::Cancelled
+                );
+                if sender.send(update).await.is_err() || terminal {
+                    return Ok(());
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RunSubmission {
+    run_id: String,
+}
+
+fn sse_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
+    let crlf = buffer.windows(4).position(|window| window == b"\r\n\r\n");
+    let lf = buffer.windows(2).position(|window| window == b"\n\n");
+    match (crlf, lf) {
+        (Some(a), Some(b)) if a <= b => Some((a, a + 4)),
+        (Some(_) | None, Some(b)) => Some((b, b + 2)),
+        (Some(a), None) => Some((a, a + 4)),
+        (None, None) => None,
+    }
+}
+
+fn run_event_update(run_id: &str, value: &Value) -> Option<HermesRunUpdate> {
+    let event = value.get("type")?.as_str()?;
+    let (kind, text) = match event {
+        "message.delta" => (HandoffEventKind::OutputDelta, value.get("delta")),
+        "tool.started" => (HandoffEventKind::ToolStarted, value.get("name")),
+        "tool.completed" => (HandoffEventKind::ToolCompleted, value.get("name")),
+        "run.completed" => (HandoffEventKind::Completed, value.get("output")),
+        "run.failed" => (HandoffEventKind::Failed, value.get("error")),
+        "run.cancelled" => (HandoffEventKind::Cancelled, None),
+        "run.started" => (HandoffEventKind::Running, None),
+        _ => return None,
+    };
+    Some(HermesRunUpdate {
+        run_id: Some(run_id.to_owned()),
+        kind,
+        text: text.and_then(Value::as_str).map(ToOwned::to_owned),
+    })
+}
+
+fn run_status_update(run_id: &str, value: &Value) -> Option<HermesRunUpdate> {
+    let status = value.get("status")?.as_str()?;
+    let (kind, text) = match status {
+        "completed" => (HandoffEventKind::Completed, value.get("output")),
+        "failed" => (HandoffEventKind::Failed, value.get("error")),
+        "cancelled" => (HandoffEventKind::Cancelled, None),
+        "running" | "started" => (HandoffEventKind::Running, None),
+        _ => return None,
+    };
+    Some(HermesRunUpdate {
+        run_id: Some(run_id.to_owned()),
+        kind,
+        text: text.and_then(Value::as_str).map(ToOwned::to_owned),
+    })
 }
 
 fn diagnosis(
@@ -504,6 +741,14 @@ pub enum HermesError {
     CredentialStore(String),
     #[error("Hermes HTTP client 初始化失败: {0}")]
     HttpClient(reqwest::Error),
+    #[error("Hermes Run 网络请求失败: {0}")]
+    RunTransport(reqwest::Error),
+    #[error("Hermes Run API 返回 HTTP {0}")]
+    RunHttp(u16),
+    #[error("Hermes SSE 单条事件超过 256 KiB")]
+    RunEventTooLarge,
+    #[error("Hermes SSE 在终态事件之前结束")]
+    RunEndedUnexpectedly,
     #[error(transparent)]
     Core(#[from] agent_ferry_core::CoreError),
     #[error(transparent)]
@@ -526,6 +771,32 @@ mod tests {
             HermesConnection::direct("server", "https://example.com?token=secret", None),
             Err(HermesError::UnsafeUrl)
         ));
+    }
+
+    #[test]
+    fn sse_boundary_handles_split_safe_lf_and_crlf_frames() {
+        assert_eq!(sse_boundary(b"data: {}\n\nrest"), Some((8, 10)));
+        assert_eq!(sse_boundary(b"data: {}\r\n\r\nrest"), Some((8, 12)));
+        assert_eq!(sse_boundary(b"data: {}\r\n"), None);
+    }
+
+    #[test]
+    fn hermes_events_map_to_ferry_terminal_and_delta_updates() {
+        let delta = run_event_update(
+            "run-1",
+            &serde_json::json!({"type": "message.delta", "delta": "你好"}),
+        )
+        .expect("delta 事件");
+        assert_eq!(delta.kind, HandoffEventKind::OutputDelta);
+        assert_eq!(delta.text.as_deref(), Some("你好"));
+
+        let completed = run_event_update(
+            "run-1",
+            &serde_json::json!({"type": "run.completed", "output": "完成"}),
+        )
+        .expect("终态事件");
+        assert_eq!(completed.kind, HandoffEventKind::Completed);
+        assert_eq!(completed.text.as_deref(), Some("完成"));
     }
 
     #[test]

@@ -177,6 +177,21 @@ pub fn send_ipc_request(
     connector: ConnectorKind,
     request: Value,
 ) -> Result<HostResponse, CoreError> {
+    let mut stream = open_ipc_stream(paths, connector, request)?;
+    Ok(read_json_frame(&mut stream)?)
+}
+
+/// 打开一条只服务于当前命令的私有 IPC 流。普通命令返回一帧后结束，
+/// Handoff 命令可继续返回实时事件；调用方断开只结束观察，不代表取消远端任务。
+///
+/// # Errors
+///
+/// token 读取、socket 连接或首帧写入失败时返回错误。
+pub fn open_ipc_stream(
+    paths: &AgentFerryPaths,
+    connector: ConnectorKind,
+    request: Value,
+) -> Result<UnixStream, CoreError> {
     let token = load_connector_token(paths)?;
     let envelope = IpcEnvelope {
         auth_token: token,
@@ -185,7 +200,7 @@ pub fn send_ipc_request(
     };
     let mut stream = UnixStream::connect(&paths.socket)?;
     write_json_frame(&mut stream, &envelope)?;
-    Ok(read_json_frame(&mut stream)?)
+    Ok(stream)
 }
 
 /// 读取 Chrome Native Messaging Host manifest。

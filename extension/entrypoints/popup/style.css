@@ -5,7 +5,7 @@
 }
 
 body {
-  width: 360px;
+  width: 390px;
   margin: 0;
 }
 
@@ -135,6 +135,15 @@ h1 {
   background: rgba(255, 255, 255, 0.34);
 }
 
+.target input {
+  margin: 0;
+  accent-color: #245c40;
+}
+
+.target-disabled {
+  opacity: 0.58;
+}
+
 .empty-target p {
   color: #4d5c54;
   font-size: 13px;
@@ -181,6 +190,32 @@ h1 {
   font-size: 11px;
 }
 
+.prompt-label {
+  display: block;
+  margin: 0 0 14px;
+  color: #526159;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+textarea {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 7px;
+  border: 1px solid #cfc9bb;
+  border-radius: 10px;
+  padding: 10px 11px;
+  resize: vertical;
+  color: #17211c;
+  background: rgba(255, 255, 255, 0.55);
+  font: 12px/1.55 Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+textarea:focus {
+  border-color: #4e7c61;
+  outline: 2px solid rgba(36, 92, 64, 0.12);
+}
+
 button {
   width: 100%;
   border-radius: 9px;
@@ -206,6 +241,34 @@ button {
 .primary:disabled {
   cursor: not-allowed;
   opacity: 0.42;
+}
+
+.run {
+  margin-top: 12px;
+  border: 1px solid #d3cdbf;
+  border-radius: 10px;
+  padding: 11px;
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.run-label {
+  margin: 0;
+  color: #315943;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.run-failed .run-label {
+  color: #a44836;
+}
+
+.run pre {
+  max-height: 180px;
+  margin: 9px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  color: #35433b;
+  font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 .footnote {

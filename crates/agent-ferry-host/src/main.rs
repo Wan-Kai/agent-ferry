@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use agent_ferry_core::{AgentFerryPaths, send_ipc_request};
+use agent_ferry_core::{AgentFerryPaths, open_ipc_stream};
 use agent_ferry_protocol::{
     ConnectorKind, ErrorCode, FrameError, HostResponse, read_frame, write_json_frame,
 };
@@ -72,20 +72,31 @@ fn run() -> Result<(), HostError> {
             .unwrap_or("unknown")
             .to_owned();
 
-        let response = match send_ipc_request(&paths, ConnectorKind::ChromeNativeHost, request) {
-            Ok(response) => response,
+        let mut daemon = match open_ipc_stream(&paths, ConnectorKind::ChromeNativeHost, request) {
+            Ok(stream) => stream,
             Err(error) => {
                 warn!(request_id, error = %error, "无法连接 agentferryd");
-                HostResponse::failure(
+                let response = HostResponse::failure(
                     request_id,
                     ErrorCode::DaemonUnavailable,
                     "无法连接 agentferryd，请先运行 aferry setup 查看修复命令",
                     true,
-                )
+                );
+                write_json_frame(&mut writer, &response)?;
+                writer.flush()?;
+                continue;
             }
         };
-        write_json_frame(&mut writer, &response)?;
-        writer.flush()?;
+        loop {
+            match read_frame(&mut daemon) {
+                Ok(message) => {
+                    agent_ferry_protocol::write_frame(&mut writer, &message)?;
+                    writer.flush()?;
+                }
+                Err(FrameError::EndOfStream) => break,
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 }
 

@@ -10,14 +10,15 @@
     "zip": "wxt zip"
   },
   "dependencies": {
-    "@wxt-dev/module-react": "latest",
+    "defuddle": "^0.18.1",
     "react": "latest",
-    "react-dom": "latest",
-    "wxt": "latest"
+    "react-dom": "latest"
   },
   "devDependencies": {
+    "@wxt-dev/module-react": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
-    "typescript": "latest"
+    "typescript": "latest",
+    "wxt": "latest"
   }
 }

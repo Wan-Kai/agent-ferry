@@ -9,6 +9,8 @@ workspace = true
 
 [dependencies]
 agent-ferry-core = { path = "../agent-ferry-core" }
+agent-ferry-protocol = { path = "../agent-ferry-protocol" }
+futures-util.workspace = true
 reqwest.workspace = true
 security-framework.workspace = true
 serde.workspace = true

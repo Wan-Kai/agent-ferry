@@ -11,10 +11,12 @@ workspace = true
 agent-ferry-core = { path = "../agent-ferry-core" }
 agent-ferry-hermes = { path = "../agent-ferry-hermes" }
 agent-ferry-protocol = { path = "../agent-ferry-protocol" }
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+url.workspace = true
 
 [[bin]]
 name = "agentferryd"

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="author" content="Agent Ferry E2E" />
+    <meta property="article:published_time" content="2026-07-16" />
+    <title>Agent Ferry 懒加载长文验证</title>
+    <style>
+      body { max-width: 720px; margin: 40px auto; font: 18px/1.8 system-ui, sans-serif; }
+      .spacer { height: 900px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <article>
+        <h1>Agent Ferry 懒加载长文验证</h1>
+        <p>这篇文章用于验证浏览器扩展能够提取普通网页、保留来源元数据，并把完整 Markdown 连同用户可见的 Prompt 一次性交给 Hermes。</p>
+        <p>第一部分描述内容捕获。扩展会在有界次数内滚动页面，让合理的懒加载正文出现；无论成功或失败，最终都必须恢复用户原来的阅读位置。</p>
+        <p>第二部分描述安全边界。浏览器只能选择已经由守护进程发现并诊断为可用的单个目标，Bearer Token 始终留在 macOS Keychain 与守护进程边界内。</p>
+        <p>第三部分描述任务生命周期。Hermes 接收 Run 后拥有远端任务，浏览器弹窗只订阅实时事件；关闭弹窗不会触发 stop，也不会取消任务。</p>
+        <div class="spacer" aria-hidden="true"></div>
+        <section id="lazy"><p>正在等待滚动加载后续正文。</p></section>
+      </article>
+    </main>
+    <script>
+      let loaded = false;
+      addEventListener("scroll", () => {
+        if (loaded || scrollY + innerHeight < document.documentElement.scrollHeight - 80) return;
+        loaded = true;
+        document.querySelector("#lazy").innerHTML = `
+          <h2>懒加载后的关键结论</h2>
+          <p>这段内容只在页面滚动到底部后出现，是端到端验证必须捕获的标记：LAZY-CONTENT-REACHED。</p>
+          <p>完整交接应包含标题、URL、作者、发布日期、站点、提取器、字数以及正文。Hermes 的输出事件由 Agent Ferry 分配严格递增的序号，再实时呈现在扩展中。</p>
+          <p>如果提取结果为空、明显过短、持续增长未稳定或超过当前消息上限，扩展应阻止交接并向用户展示原因，而不是退化为只发送一个 URL。</p>
+        `;
+      });
+    </script>
+  </body>
+</html>

@@ -42,6 +42,12 @@ pub enum Command {
     ConnectionRemove {
         identifier: String,
     },
+    Handoff {
+        task_id: String,
+        target_id: String,
+        prompt: String,
+        source: SourceDocument,
+    },
 }
 
 impl std::fmt::Debug for Command {
@@ -65,6 +71,18 @@ impl std::fmt::Debug for Command {
                 .debug_struct("ConnectionRemove")
                 .field("identifier", identifier)
                 .finish(),
+            Self::Handoff {
+                task_id,
+                target_id,
+                prompt: _,
+                source,
+            } => formatter
+                .debug_struct("Handoff")
+                .field("task_id", task_id)
+                .field("target_id", target_id)
+                .field("source_url", &source.url)
+                .field("content", &"[REDACTED]")
+                .finish(),
         }
     }
 }
@@ -76,8 +94,45 @@ impl Command {
             Self::Status => "status",
             Self::ConnectionAdd { .. } => "connection_add",
             Self::ConnectionRemove { .. } => "connection_remove",
+            Self::Handoff { .. } => "handoff",
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceDocument {
+    pub url: String,
+    pub title: String,
+    pub author: Option<String>,
+    pub published: Option<String>,
+    pub site: Option<String>,
+    pub extractor: String,
+    pub markdown: String,
+    pub word_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HandoffEventKind {
+    Submitted,
+    Running,
+    OutputDelta,
+    ToolStarted,
+    ToolCompleted,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffEvent {
+    pub protocol_version: u16,
+    pub request_id: String,
+    pub task_id: String,
+    pub sequence: u64,
+    pub event: HandoffEventKind,
+    pub run_id: Option<String>,
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

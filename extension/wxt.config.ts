@@ -6,6 +6,6 @@ export default defineConfig({
   manifest: {
     name: "Agent Ferry",
     description: "Send web content to a local AI Agent workspace.",
-    permissions: ["activeTab", "nativeMessaging"],
+    permissions: ["activeTab", "nativeMessaging", "scripting"],
   },
 });
