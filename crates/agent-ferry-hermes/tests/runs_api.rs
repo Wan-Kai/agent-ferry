@@ -169,6 +169,86 @@ async fn submits_input_and_delivers_chunked_sse_updates_in_order() {
 }
 
 #[tokio::test]
+async fn falls_back_to_status_polling_when_sse_ends_before_terminal() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("启动会提前关闭 SSE 的 fake Hermes");
+    let address = listener.local_addr().expect("读取 fake Hermes 地址");
+    let server = tokio::spawn(async move {
+        let (mut post_stream, _) = listener.accept().await.expect("接受 run submission");
+        let post = read_request(&mut post_stream).await;
+        write_json(
+            &mut post_stream,
+            "202 Accepted",
+            r#"{"run_id":"run-sse-fallback","status":"started"}"#,
+        )
+        .await;
+
+        let (mut event_stream, _) = listener.accept().await.expect("接受 SSE 订阅");
+        let events = read_request(&mut event_stream).await;
+        write_sse_headers(&mut event_stream).await;
+        event_stream
+            .write_all(b"data: {\"type\":\"run.started\"}\n\n")
+            .await
+            .expect("写入非终态事件");
+        drop(event_stream);
+
+        let (mut status_stream, _) = listener.accept().await.expect("接受状态回退请求");
+        let status = read_request(&mut status_stream).await;
+        write_json(
+            &mut status_stream,
+            "200 OK",
+            r#"{"run_id":"run-sse-fallback","status":"completed","output":"轮询确认完成"}"#,
+        )
+        .await;
+        (post, events, status)
+    });
+
+    let connection = HermesConnection::direct("fake", &format!("http://{address}"), None)
+        .expect("创建 fake Connection");
+    let client = HermesClient::new(Duration::from_secs(2)).expect("创建 Hermes client");
+    let mut receiver = client.run(
+        connection,
+        b"integration-token".to_vec(),
+        "必须观察到真实终态".to_owned(),
+        true,
+    );
+    let mut updates = Vec::new();
+    while let Some(update) = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        .await
+        .expect("等待回退后的终态不应超时")
+    {
+        let terminal = update.kind == HandoffEventKind::Completed;
+        updates.push(update);
+        if terminal {
+            break;
+        }
+    }
+    assert_eq!(
+        updates.iter().map(|update| update.kind).collect::<Vec<_>>(),
+        [
+            HandoffEventKind::Submitted,
+            HandoffEventKind::Running,
+            HandoffEventKind::Completed,
+        ]
+    );
+    assert_eq!(
+        updates.last().and_then(|update| update.text.as_deref()),
+        Some("轮询确认完成")
+    );
+
+    let (post, events, status) = server.await.expect("等待 fake Hermes");
+    assert_bearer(&post);
+    assert_bearer(&events);
+    assert_bearer(&status);
+    assert!(
+        status
+            .head
+            .starts_with("GET /v1/runs/run-sse-fallback HTTP/1.1")
+    );
+}
+
+#[tokio::test]
 async fn dropping_observer_never_stops_a_remote_run() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await

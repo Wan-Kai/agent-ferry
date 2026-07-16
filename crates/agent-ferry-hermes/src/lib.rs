@@ -679,8 +679,20 @@ impl HermesClient {
             return Ok(());
         }
         if use_sse {
-            self.observe_sse(connection, token, &submission.run_id, sender)
+            match self
+                .observe_sse(connection, token, &submission.run_id, sender)
                 .await
+            {
+                Ok(()) => Ok(()),
+                Err(HermesError::RunEndedUnexpectedly) => {
+                    // Hermes 的执行生命周期独立于 SSE 观察连接；代理、网络或服务端可能在
+                    // run.completed 前关闭流。此时以权威状态接口继续观察，不能把仍在运行、
+                    // 甚至已经完成的任务误报为失败。
+                    self.observe_polling(connection, token, &submission.run_id, sender)
+                        .await
+                }
+                Err(error) => Err(error),
+            }
         } else {
             self.observe_polling(connection, token, &submission.run_id, sender)
                 .await
