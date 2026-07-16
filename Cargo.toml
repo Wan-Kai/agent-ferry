@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/agent-ferry-cli",
+    "crates/agent-ferry-claude",
     "crates/agent-ferry-core",
     "crates/agent-ferry-daemon",
     "crates/agent-ferry-host",

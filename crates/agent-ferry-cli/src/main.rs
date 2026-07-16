@@ -3,6 +3,7 @@ use std::io::{self, IsTerminal as _, Read, Write as _};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use agent_ferry_claude::{ClaudeDiagnosis, ClaudeState};
 use agent_ferry_core::{
     AgentFerryPaths, NativeHostManifest, open_ipc_stream, read_native_host_manifest,
     send_ipc_request,
@@ -42,6 +43,35 @@ enum CliCommand {
         #[command(subcommand)]
         command: ConnectionCommand,
     },
+    /// 管理本地 Agent 绑定
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentCommand {
+    /// 管理用户自行安装的 Claude Code；Agent Ferry 不代为安装
+    Claude {
+        #[command(subcommand)]
+        command: ClaudeCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ClaudeCommand {
+    /// 从 PATH 发现候选；单一且兼容时自动绑定
+    Detect(OutputArgs),
+    /// 使用绝对路径明确绑定 Claude Code
+    Bind {
+        #[arg(long)]
+        path: PathBuf,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// 诊断已绑定路径、Print Mode flags 和认证状态
+    Doctor(OutputArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -217,6 +247,65 @@ fn run(cli: Cli) -> Result<i32, CliError> {
             Ok(0)
         }
         Some(CliCommand::Connection { command }) => run_connection_command(command),
+        Some(CliCommand::Agent { command }) => run_agent_command(command),
+    }
+}
+
+fn run_agent_command(command: AgentCommand) -> Result<i32, CliError> {
+    let paths = AgentFerryPaths::discover()?;
+    match command {
+        AgentCommand::Claude { command } => {
+            let (diagnosis, output) = match command {
+                ClaudeCommand::Detect(output) => {
+                    (agent_ferry_claude::detect_and_auto_bind(&paths)?, output)
+                }
+                ClaudeCommand::Bind { path, output } => {
+                    (agent_ferry_claude::bind(&paths, &path)?, output)
+                }
+                ClaudeCommand::Doctor(output) => {
+                    (agent_ferry_claude::diagnose_binding(&paths)?, output)
+                }
+            };
+            print_claude_diagnosis(&diagnosis, output.json)?;
+            Ok(i32::from(diagnosis.state != ClaudeState::Ready))
+        }
+    }
+}
+
+fn print_claude_diagnosis(diagnosis: &ClaudeDiagnosis, json: bool) -> Result<(), CliError> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(diagnosis)?);
+        return Ok(());
+    }
+    println!("Claude Code  {}", claude_state_name(diagnosis.state));
+    println!("  {}", diagnosis.detail);
+    if let Some(executable) = &diagnosis.executable {
+        println!("  executable: {}", executable.display());
+    }
+    if let Some(version) = &diagnosis.version {
+        println!("  version: {version}");
+    }
+    for candidate in &diagnosis.candidates {
+        println!("  candidate: {}", candidate.display());
+    }
+    if diagnosis.state == ClaudeState::NotDetected {
+        println!("  官方安装文档: https://code.claude.com/docs/en/installation");
+        println!("  安装完成后复检: aferry agent claude detect");
+    } else if diagnosis.state == ClaudeState::NeedsSelection {
+        println!("  选择命令: aferry agent claude bind --path <absolute-path>");
+    } else if diagnosis.state == ClaudeState::NotAuthenticated {
+        println!("  请先运行 Claude Code 官方登录流程，再执行 aferry agent claude doctor");
+    }
+    Ok(())
+}
+
+const fn claude_state_name(state: ClaudeState) -> &'static str {
+    match state {
+        ClaudeState::NotDetected => "not_detected",
+        ClaudeState::NeedsSelection => "needs_selection",
+        ClaudeState::Incompatible => "incompatible",
+        ClaudeState::NotAuthenticated => "not_authenticated",
+        ClaudeState::Ready => "ready",
     }
 }
 
@@ -889,6 +978,8 @@ enum CliError {
     Frame(#[from] FrameError),
     #[error(transparent)]
     Hermes(#[from] agent_ferry_hermes::HermesError),
+    #[error(transparent)]
+    Claude(#[from] agent_ferry_claude::ClaudeError),
     #[error("Chrome extension id 必须是 32 个 a-p 小写字符")]
     InvalidExtensionId,
     #[error("Native Host 不可执行: {0}")]

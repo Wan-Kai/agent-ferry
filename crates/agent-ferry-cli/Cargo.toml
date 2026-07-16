@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 agent-ferry-core = { path = "../agent-ferry-core" }
+agent-ferry-claude = { path = "../agent-ferry-claude" }
 agent-ferry-hermes = { path = "../agent-ferry-hermes" }
 agent-ferry-protocol = { path = "../agent-ferry-protocol" }
 agent-ferry-transport = { path = "../agent-ferry-transport" }
