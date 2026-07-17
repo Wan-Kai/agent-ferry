@@ -65,6 +65,17 @@ pub enum Command {
     WorkspaceRemove {
         identifier: String,
     },
+    HistoryList {
+        state: Option<TaskHistoryState>,
+        #[serde(default = "default_history_limit")]
+        limit: u16,
+    },
+    HistoryGet {
+        task_id: String,
+    },
+    HistoryDelete {
+        task_id: String,
+    },
     HermesRun {
         task_id: String,
         target_id: String,
@@ -126,6 +137,19 @@ impl std::fmt::Debug for Command {
             Self::WorkspaceRemove { identifier } => formatter
                 .debug_struct("WorkspaceRemove")
                 .field("identifier", identifier)
+                .finish(),
+            Self::HistoryList { state, limit } => formatter
+                .debug_struct("HistoryList")
+                .field("state", state)
+                .field("limit", limit)
+                .finish(),
+            Self::HistoryGet { task_id } => formatter
+                .debug_struct("HistoryGet")
+                .field("task_id", task_id)
+                .finish(),
+            Self::HistoryDelete { task_id } => formatter
+                .debug_struct("HistoryDelete")
+                .field("task_id", task_id)
                 .finish(),
             Self::HermesRun {
                 task_id,
@@ -193,6 +217,9 @@ impl Command {
             Self::ConnectionRemove { .. } => "connection_remove",
             Self::WorkspaceAdd { .. } => "workspace_add",
             Self::WorkspaceRemove { .. } => "workspace_remove",
+            Self::HistoryList { .. } => "history_list",
+            Self::HistoryGet { .. } => "history_get",
+            Self::HistoryDelete { .. } => "history_delete",
             Self::HermesRun { .. } => "hermes_run",
             Self::Handoff { .. } => "handoff",
             Self::HandoffBegin { .. } => "handoff_begin",
@@ -200,6 +227,10 @@ impl Command {
             Self::HandoffEnd { .. } => "handoff_end",
         }
     }
+}
+
+const fn default_history_limit() -> u16 {
+    50
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +310,93 @@ pub struct HandoffEvent {
     pub event: HandoffEventKind,
     pub run_id: Option<String>,
     pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskHistoryState {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+impl TaskHistoryState {
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskHistoryEvent {
+    pub sequence: u64,
+    pub event: HandoffEventKind,
+    pub timestamp_ms: u64,
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskHistorySummary {
+    pub task_id: String,
+    pub title: String,
+    pub url: String,
+    pub site: Option<String>,
+    pub extractor: String,
+    pub target_id: String,
+    pub target_name: String,
+    pub workspace_name: Option<String>,
+    pub workspace_path: Option<String>,
+    pub state: TaskHistoryState,
+    pub stage: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub completed_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskHistoryRecord {
+    pub summary: TaskHistorySummary,
+    pub prompt: String,
+    pub output: String,
+    pub output_truncated: bool,
+    pub error: Option<String>,
+    pub run_id: Option<String>,
+    pub events: Vec<TaskHistoryEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskHistoryListResult {
+    pub tasks: Vec<TaskHistorySummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskHistoryGetResult {
+    pub task: Option<TaskHistoryRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskHistoryDeleteResult {
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskHistoryResponse<T> {
+    pub protocol_version: u16,
+    pub request_id: String,
+    pub result: T,
+}
+
+impl<T> TaskHistoryResponse<T> {
+    #[must_use]
+    pub fn new(request_id: impl Into<String>, result: T) -> Self {
+        Self {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: request_id.into(),
+            result,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -602,5 +720,22 @@ mod tests {
                 .expect("序列化 Codex App kind"),
             "\"local_codex_app\""
         );
+    }
+
+    #[test]
+    fn history_commands_have_stable_wire_names() {
+        let request = HostRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: "history-1".to_owned(),
+            command: Command::HistoryList {
+                state: Some(TaskHistoryState::Running),
+                limit: 50,
+            },
+        };
+
+        let value = serde_json::to_value(request).expect("序列化历史查询");
+        assert_eq!(value["command"]["type"], "history_list");
+        assert_eq!(value["command"]["state"], "running");
+        assert_eq!(value["command"]["limit"], 50);
     }
 }

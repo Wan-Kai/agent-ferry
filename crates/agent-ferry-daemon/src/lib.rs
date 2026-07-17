@@ -26,7 +26,8 @@ use agent_ferry_protocol::{
     HandoffTargetState, HandoffTargetStatus, HandoffTransferAck, HandoffTransferPhase, HostRequest,
     HostResponse, IpcEnvelope, LocalWorkspaceStatus, MAX_HANDOFF_CHUNK_BYTES, MAX_HANDOFF_CHUNKS,
     MAX_HANDOFF_CONTENT_BYTES, MAX_HERMES_RUN_INPUT_BYTES, MAX_MESSAGE_BYTES, PROTOCOL_VERSION,
-    ServiceState, SourceDocument, SourceMetadata, StatusResult,
+    ServiceState, SourceDocument, SourceMetadata, StatusResult, TaskHistoryDeleteResult,
+    TaskHistoryGetResult, TaskHistoryListResult, TaskHistoryResponse,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -35,6 +36,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{info, warn};
+
+mod history;
+
+use history::{HistoryRepository, TargetSnapshot};
 
 #[derive(Debug)]
 pub struct Daemon {
@@ -45,6 +50,7 @@ pub struct Daemon {
     hermes_client: Arc<HermesClient>,
     handoff_assemblies: Arc<Mutex<HashMap<String, HandoffAssembly>>>,
     target_cache: Arc<Mutex<Vec<HandoffTargetStatus>>>,
+    history: Arc<Mutex<HistoryRepository>>,
 }
 
 const MAX_ACTIVE_HANDOFF_ASSEMBLIES: usize = 8;
@@ -153,6 +159,7 @@ impl Daemon {
         let listener = UnixListener::bind(&paths.socket)?;
         std::fs::set_permissions(&paths.socket, std::fs::Permissions::from_mode(0o600))?;
         let hermes_client = HermesClient::new(Duration::from_secs(5)).map_err(io::Error::other)?;
+        let history = HistoryRepository::open(&paths)?;
         Ok(Self {
             paths,
             listener,
@@ -161,6 +168,7 @@ impl Daemon {
             hermes_client: Arc::new(hermes_client),
             handoff_assemblies: Arc::new(Mutex::new(HashMap::new())),
             target_cache: Arc::new(Mutex::new(Vec::new())),
+            history: Arc::new(Mutex::new(history)),
         })
     }
 
@@ -203,6 +211,7 @@ impl Daemon {
                     let hermes_client = Arc::clone(&self.hermes_client);
                     let handoff_assemblies = Arc::clone(&self.handoff_assemblies);
                     let target_cache = Arc::clone(&self.target_cache);
+                    let history = Arc::clone(&self.history);
                     tokio::spawn(async move {
                         if let Err(error) = handle_connection(
                             stream,
@@ -212,6 +221,7 @@ impl Daemon {
                             &hermes_client,
                             &handoff_assemblies,
                             &target_cache,
+                            &history,
                         ).await {
                             warn!(error = %error, "本地 Connector 请求失败");
                         }
@@ -227,7 +237,7 @@ impl Daemon {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn handle_connection(
     mut stream: UnixStream,
     expected_token: &str,
@@ -236,6 +246,7 @@ async fn handle_connection(
     hermes_client: &HermesClient,
     handoff_assemblies: &Mutex<HashMap<String, HandoffAssembly>>,
     target_cache: &Mutex<Vec<HandoffTargetStatus>>,
+    history: &Mutex<HistoryRepository>,
 ) -> io::Result<()> {
     let payload = match read_async_frame(&mut stream).await {
         Ok(payload) => payload,
@@ -329,6 +340,7 @@ async fn handle_connection(
                 &envelope.connector,
                 paths,
                 hermes_client,
+                history,
             )
             .await
         }
@@ -392,12 +404,50 @@ async fn handle_connection(
                         &envelope.connector,
                         paths,
                         hermes_client,
+                        history,
                     )
                     .await
                 }
                 Err(response) => write_async_json(&mut stream, &response).await,
             }
         }
+        Command::HistoryList { state, limit } => {
+            let tasks = history.lock().await.list(state, limit);
+            write_async_json(
+                &mut stream,
+                &TaskHistoryResponse::new(request_id, TaskHistoryListResult { tasks }),
+            )
+            .await
+        }
+        Command::HistoryGet { task_id } => {
+            let task = history.lock().await.get(&task_id);
+            write_async_json(
+                &mut stream,
+                &TaskHistoryResponse::new(request_id, TaskHistoryGetResult { task }),
+            )
+            .await
+        }
+        Command::HistoryDelete { task_id } => match history.lock().await.delete(&task_id) {
+            Ok(deleted) => {
+                write_async_json(
+                    &mut stream,
+                    &TaskHistoryResponse::new(request_id, TaskHistoryDeleteResult { deleted }),
+                )
+                .await
+            }
+            Err(error) => {
+                write_async_json(
+                    &mut stream,
+                    &HostResponse::failure(
+                        request_id,
+                        ErrorCode::InvalidMessage,
+                        error.to_string(),
+                        false,
+                    ),
+                )
+                .await
+            }
+        },
         command => {
             let response = dispatch_request(
                 HostRequest {
@@ -554,6 +604,9 @@ async fn dispatch_request(
             .await
         }
         Command::HermesRun { .. }
+        | Command::HistoryList { .. }
+        | Command::HistoryGet { .. }
+        | Command::HistoryDelete { .. }
         | Command::Handoff { .. }
         | Command::HandoffBegin { .. }
         | Command::HandoffChunk { .. }
@@ -597,6 +650,9 @@ fn decode_request(value: Value) -> Result<HostRequest, HostResponse> {
                 | "connection_remove"
                 | "workspace_add"
                 | "workspace_remove"
+                | "history_list"
+                | "history_get"
+                | "history_delete"
                 | "hermes_run"
                 | "handoff"
                 | "handoff_begin"
@@ -885,6 +941,71 @@ async fn write_transfer_result(
     }
 }
 
+async fn record_and_forward_event(
+    stream: &mut UnixStream,
+    observer_connected: &mut bool,
+    history: Option<&Mutex<HistoryRepository>>,
+    event: &HandoffEvent,
+) {
+    if let Some(history) = history
+        && let Err(error) = history.lock().await.apply_event(event)
+    {
+        warn!(task_id = event.task_id, error = %error, "持久化任务历史失败");
+    }
+    if *observer_connected && write_async_json(stream, event).await.is_err() {
+        *observer_connected = false;
+        info!(
+            task_id = event.task_id,
+            "浏览器观察者已离开，任务继续执行并写入历史"
+        );
+    }
+}
+
+fn history_target_snapshot(paths: &AgentFerryPaths, target_id: &str) -> TargetSnapshot {
+    let local = [
+        (OPENCODE_TARGET_PREFIX, "OpenCode"),
+        (CLAUDE_TARGET_PREFIX, "Claude Code"),
+        (CODEX_CLI_TARGET_PREFIX, "Codex CLI"),
+        (CODEX_APP_TARGET_PREFIX, "Codex App"),
+    ]
+    .into_iter()
+    .find_map(|(prefix, label)| {
+        target_id
+            .strip_prefix(prefix)
+            .map(|workspace_id| (label, workspace_id))
+    });
+    if let Some((label, workspace_id)) = local {
+        let workspace = agent_ferry_core::workspace::load(paths)
+            .ok()
+            .and_then(|config| {
+                config
+                    .workspaces
+                    .into_iter()
+                    .find(|workspace| workspace.id == workspace_id)
+            });
+        return TargetSnapshot {
+            name: label.to_owned(),
+            workspace_name: workspace.as_ref().map(|workspace| workspace.name.clone()),
+            workspace_path: workspace.map(|workspace| workspace.path.display().to_string()),
+        };
+    }
+    let name = load_connections(&paths.hermes_connections)
+        .ok()
+        .and_then(|connections| {
+            connections
+                .connections
+                .into_iter()
+                .find(|connection| connection.id == target_id)
+                .map(|connection| connection.name)
+        })
+        .unwrap_or_else(|| "Hermes".to_owned());
+    TargetSnapshot {
+        name,
+        workspace_name: None,
+        workspace_path: None,
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn stream_handoff(
     stream: &mut UnixStream,
@@ -896,6 +1017,7 @@ async fn stream_handoff(
     connector: &ConnectorKind,
     paths: &AgentFerryPaths,
     hermes_client: &HermesClient,
+    history: &Mutex<HistoryRepository>,
 ) -> io::Result<()> {
     if *connector != ConnectorKind::ChromeNativeHost {
         return write_async_json(
@@ -921,47 +1043,97 @@ async fn stream_handoff(
         )
         .await;
     }
+    let target = history_target_snapshot(paths, &target_id);
+    if let Err(error) =
+        history
+            .lock()
+            .await
+            .create(&task_id, target_id.clone(), target, prompt.clone(), &source)
+    {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(request_id, ErrorCode::Internal, error.to_string(), false),
+        )
+        .await;
+    }
     if target_id.starts_with(OPENCODE_TARGET_PREFIX) {
-        return stream_opencode_updates(
-            stream, request_id, task_id, target_id, prompt, source, paths,
-        )
-        .await;
-    }
-    if target_id.starts_with(CLAUDE_TARGET_PREFIX) {
-        return stream_claude_updates(
-            stream, request_id, task_id, target_id, prompt, source, paths,
-        )
-        .await;
-    }
-    if target_id.starts_with(CODEX_CLI_TARGET_PREFIX) {
-        return stream_codex_updates(
+        let result = stream_opencode_updates(
             stream,
             request_id,
-            task_id,
+            task_id.clone(),
+            target_id,
+            prompt,
+            source,
+            paths,
+            history,
+        )
+        .await;
+        let _ = history
+            .lock()
+            .await
+            .fail_if_running(&task_id, "OpenCode 任务在返回终态前结束");
+        return result;
+    }
+    if target_id.starts_with(CLAUDE_TARGET_PREFIX) {
+        let result = stream_claude_updates(
+            stream,
+            request_id,
+            task_id.clone(),
+            target_id,
+            prompt,
+            source,
+            paths,
+            history,
+        )
+        .await;
+        let _ = history
+            .lock()
+            .await
+            .fail_if_running(&task_id, "Claude Code 任务在返回终态前结束");
+        return result;
+    }
+    if target_id.starts_with(CODEX_CLI_TARGET_PREFIX) {
+        let result = stream_codex_updates(
+            stream,
+            request_id,
+            task_id.clone(),
             target_id,
             prompt,
             source,
             paths,
             CodexSurface::Cli,
+            history,
         )
         .await;
+        let _ = history
+            .lock()
+            .await
+            .fail_if_running(&task_id, "Codex CLI 任务在返回终态前结束");
+        return result;
     }
     if target_id.starts_with(CODEX_APP_TARGET_PREFIX) {
-        return stream_codex_updates(
+        let result = stream_codex_updates(
             stream,
             request_id,
-            task_id,
+            task_id.clone(),
             target_id,
             prompt,
             source,
             paths,
             CodexSurface::App,
+            history,
         )
         .await;
+        let _ = history
+            .lock()
+            .await
+            .fail_if_running(&task_id, "Codex App 任务在返回终态前结束");
+        return result;
     }
     let input = match compose_handoff_input(&prompt, &source) {
         Ok(input) => input,
         Err(message) => {
+            let _ = history.lock().await.fail_if_running(&task_id, &message);
             return write_async_json(
                 stream,
                 &HostResponse::failure(request_id, ErrorCode::InvalidMessage, message, false),
@@ -969,16 +1141,22 @@ async fn stream_handoff(
             .await;
         }
     };
-    stream_hermes_updates(
+    let result = stream_hermes_updates(
         stream,
         request_id,
-        task_id,
+        task_id.clone(),
         target_id,
         input,
         paths,
         hermes_client,
+        Some(history),
     )
-    .await
+    .await;
+    let _ = history
+        .lock()
+        .await
+        .fail_if_running(&task_id, "Hermes 任务在返回终态前结束");
+    result
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -990,6 +1168,7 @@ async fn stream_opencode_updates(
     prompt: String,
     source: SourceDocument,
     paths: &AgentFerryPaths,
+    history: &Mutex<HistoryRepository>,
 ) -> io::Result<()> {
     let Some(workspace_id) = target_id.strip_prefix(OPENCODE_TARGET_PREFIX) else {
         return Ok(());
@@ -1071,6 +1250,7 @@ async fn stream_opencode_updates(
     });
 
     let mut sequence = 0_u64;
+    let mut observer_connected = true;
     while let Some(update) = receiver.recv().await {
         let (event_kind, text, terminal) = match update {
             OpenCodeTaskEvent::Started { .. } => (
@@ -1110,11 +1290,7 @@ async fn stream_opencode_updates(
             run_id: None,
             text,
         };
-        if write_async_json(stream, &event).await.is_err() {
-            // 本地 Agent 由 daemon 持有；弹窗关闭只丢弃实时展示，不能改变任务执行语义。
-            info!(task_id, "浏览器观察者已离开，OpenCode 任务继续执行");
-            return Ok(());
-        }
+        record_and_forward_event(stream, &mut observer_connected, Some(history), &event).await;
         sequence = sequence.saturating_add(1);
         if terminal {
             return Ok(());
@@ -1132,6 +1308,7 @@ async fn stream_claude_updates(
     prompt: String,
     source: SourceDocument,
     paths: &AgentFerryPaths,
+    history: &Mutex<HistoryRepository>,
 ) -> io::Result<()> {
     let Some(workspace_id) = target_id.strip_prefix(CLAUDE_TARGET_PREFIX) else {
         return Ok(());
@@ -1218,6 +1395,7 @@ async fn stream_claude_updates(
     });
 
     let mut sequence = 0_u64;
+    let mut observer_connected = true;
     while let Some(update) = receiver.recv().await {
         let (event_kind, text, terminal) = match update {
             ClaudeTaskEvent::Started { .. } => (
@@ -1252,10 +1430,7 @@ async fn stream_claude_updates(
             run_id: None,
             text,
         };
-        if write_async_json(stream, &event).await.is_err() {
-            info!(task_id, "浏览器观察者已离开，Claude Code 任务继续执行");
-            return Ok(());
-        }
+        record_and_forward_event(stream, &mut observer_connected, Some(history), &event).await;
         sequence = sequence.saturating_add(1);
         if terminal {
             return Ok(());
@@ -1274,6 +1449,7 @@ async fn stream_codex_updates(
     source: SourceDocument,
     paths: &AgentFerryPaths,
     surface: CodexSurface,
+    history: &Mutex<HistoryRepository>,
 ) -> io::Result<()> {
     let prefix = match surface {
         CodexSurface::Cli => CODEX_CLI_TARGET_PREFIX,
@@ -1365,6 +1541,7 @@ async fn stream_codex_updates(
     });
 
     let mut sequence = 0_u64;
+    let mut observer_connected = true;
     while let Some(update) = receiver.recv().await {
         let (event_kind, text, terminal) = match update {
             CodexTaskEvent::Started { .. } => (
@@ -1407,10 +1584,7 @@ async fn stream_codex_updates(
             run_id: None,
             text,
         };
-        if write_async_json(stream, &event).await.is_err() {
-            info!(task_id, "浏览器观察者已离开，Codex 任务继续执行");
-            return Ok(());
-        }
+        record_and_forward_event(stream, &mut observer_connected, Some(history), &event).await;
         sequence = sequence.saturating_add(1);
         if terminal {
             return Ok(());
@@ -1474,6 +1648,7 @@ async fn stream_cli_hermes_run(
         input,
         paths,
         hermes_client,
+        None,
     )
     .await
 }
@@ -1487,6 +1662,7 @@ async fn stream_hermes_updates(
     input: String,
     paths: &AgentFerryPaths,
     hermes_client: &HermesClient,
+    history: Option<&Mutex<HistoryRepository>>,
 ) -> io::Result<()> {
     let connections = match load_connections(&paths.hermes_connections) {
         Ok(connections) => connections,
@@ -1565,6 +1741,7 @@ async fn stream_hermes_updates(
     let mut updates = hermes_client.run(connection, token, input, use_sse);
     let mut sequence = 0_u64;
     let mut reached_terminal = false;
+    let mut observer_connected = true;
     while let Some(update) = updates.recv().await {
         info!(
             task_id,
@@ -1588,11 +1765,7 @@ async fn stream_hermes_updates(
             run_id: update.run_id,
             text: update.text,
         };
-        if write_async_json(stream, &event).await.is_err() {
-            // 观察端离开只中断本地输出；Hermes Run 已经由远端托管，不能据此误取消长时任务。
-            info!(task_id, "本地观察者已离开，远端 Run 继续执行");
-            break;
-        }
+        record_and_forward_event(stream, &mut observer_connected, history, &event).await;
         sequence = sequence.saturating_add(1);
         if reached_terminal {
             return Ok(());
@@ -1608,7 +1781,7 @@ async fn stream_hermes_updates(
             run_id: None,
             text: Some("Hermes Run 事件流未返回终态".to_owned()),
         };
-        let _ = write_async_json(stream, &event).await;
+        record_and_forward_event(stream, &mut observer_connected, history, &event).await;
     }
     Ok(())
 }
@@ -1809,6 +1982,8 @@ async fn status_response(
                 "target.read".to_owned(),
                 "handoff.submit".to_owned(),
                 "handoff.chunked".to_owned(),
+                "history.read".to_owned(),
+                "history.delete".to_owned(),
                 "workspace.write".to_owned(),
             ],
             targets: targets.into_boxed_slice(),

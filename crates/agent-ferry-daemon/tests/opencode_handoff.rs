@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use agent_ferry_core::{AgentFerryPaths, load_connector_token};
 use agent_ferry_daemon::Daemon;
 use agent_ferry_protocol::{
-    ConnectorKind, HandoffEvent, HandoffEventKind, IpcEnvelope, read_json_frame, write_json_frame,
+    ConnectorKind, HandoffEvent, HandoffEventKind, IpcEnvelope, TaskHistoryDeleteResult,
+    TaskHistoryGetResult, TaskHistoryListResult, TaskHistoryResponse, TaskHistoryState,
+    read_json_frame, write_json_frame,
 };
 use serde_json::json;
 use tokio::sync::oneshot;
@@ -50,6 +52,7 @@ exit 2
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::too_many_lines)]
 async fn chrome_handoff_runs_opencode_in_configured_workspace() {
     let root = temporary_root();
     let paths = AgentFerryPaths::from_root(root.join("ferry"));
@@ -91,7 +94,7 @@ async fn chrome_handoff_runs_opencode_in_configured_workspace() {
         }
     });
     let envelope = IpcEnvelope {
-        auth_token: token,
+        auth_token: token.clone(),
         connector: ConnectorKind::ChromeNativeHost,
         request,
     };
@@ -111,6 +114,51 @@ async fn chrome_handoff_runs_opencode_in_configured_workspace() {
             break;
         }
     }
+
+    let send_history = |request: serde_json::Value| {
+        let envelope = IpcEnvelope {
+            auth_token: token.clone(),
+            connector: ConnectorKind::ChromeNativeHost,
+            request,
+        };
+        let mut stream = UnixStream::connect(&paths.socket).expect("连接历史查询 socket");
+        write_json_frame(&mut stream, &envelope).expect("发送历史查询");
+        stream
+    };
+    let mut list_stream = send_history(json!({
+        "protocol_version": 1,
+        "request_id": "history-list",
+        "command": { "type": "history_list", "state": "completed", "limit": 50 }
+    }));
+    let listed: TaskHistoryResponse<TaskHistoryListResult> =
+        read_json_frame(&mut list_stream).expect("读取历史列表");
+    assert_eq!(listed.result.tasks.len(), 1);
+    assert_eq!(listed.result.tasks[0].task_id, task_id);
+    assert_eq!(listed.result.tasks[0].state, TaskHistoryState::Completed);
+
+    let mut get_stream = send_history(json!({
+        "protocol_version": 1,
+        "request_id": "history-get",
+        "command": { "type": "history_get", "task_id": task_id }
+    }));
+    let detail: TaskHistoryResponse<TaskHistoryGetResult> =
+        read_json_frame(&mut get_stream).expect("读取历史详情");
+    let record = detail.result.task.expect("历史详情存在");
+    assert_eq!(record.output, "PLUGIN_OPENCODE_E2E_OK");
+    assert_eq!(record.prompt, "只通过 stdin 进入 OpenCode 的 Prompt");
+    assert_eq!(
+        record.summary.workspace_name.as_deref(),
+        Some("test-workspace")
+    );
+
+    let mut delete_stream = send_history(json!({
+        "protocol_version": 1,
+        "request_id": "history-delete",
+        "command": { "type": "history_delete", "task_id": task_id }
+    }));
+    let deleted: TaskHistoryResponse<TaskHistoryDeleteResult> =
+        read_json_frame(&mut delete_stream).expect("删除历史详情");
+    assert!(deleted.result.deleted);
     shutdown_tx.send(()).expect("停止 daemon");
     daemon_task
         .await

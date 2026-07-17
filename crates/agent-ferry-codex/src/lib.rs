@@ -121,6 +121,7 @@ pub fn discover_candidates(candidates: impl IntoIterator<Item = PathBuf>) -> Vec
 
 /// 只调用 Codex 公开 CLI 命令诊断，不读取或复制 Codex 的 auth/state 文件。
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn diagnose_executable(executable: &Path) -> CodexDiagnosis {
     let executable = match validate_absolute_executable(executable) {
         Ok(executable) => executable,
