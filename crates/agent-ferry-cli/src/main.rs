@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 use agent_ferry_claude::{
     ClaudeDiagnosis, ClaudeDocument, ClaudeState, ClaudeTaskEvent, MAX_CLAUDE_DOCUMENT_BYTES,
 };
+use agent_ferry_codex::{
+    CodexDiagnosis, CodexDocument, CodexState, CodexSurface, CodexTaskEvent,
+    MAX_CODEX_DOCUMENT_BYTES,
+};
 use agent_ferry_core::workspace::{WorkspaceState, diagnose as diagnose_workspace};
 use agent_ferry_core::{
     AgentFerryPaths, NativeHostManifest, open_ipc_stream, read_native_host_manifest,
@@ -23,7 +27,7 @@ use agent_ferry_protocol::{
     HandoffTargetState, HandoffTargetStatus, HostRequest, HostResponse, MAX_HERMES_RUN_INPUT_BYTES,
     PROTOCOL_VERSION, ResponseOutcome, ServiceState, StatusResult, read_json_frame,
 };
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -111,6 +115,57 @@ enum AgentCommand {
     Opencode {
         #[command(subcommand)]
         command: OpenCodeCommand,
+    },
+    /// 管理用户自行安装或桌面 App 内置的 Codex；Agent Ferry 不代为安装
+    Codex {
+        #[command(subcommand)]
+        command: CodexCommand,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CodexRunSurface {
+    Cli,
+    App,
+}
+
+impl From<CodexRunSurface> for CodexSurface {
+    fn from(value: CodexRunSurface) -> Self {
+        match value {
+            CodexRunSurface::Cli => Self::Cli,
+            CodexRunSurface::App => Self::App,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum CodexCommand {
+    /// 从 PATH 与官方桌面 App 位置发现候选；单一且兼容时自动绑定
+    Detect(OutputArgs),
+    /// 使用绝对路径明确绑定 Codex
+    Bind {
+        #[arg(long)]
+        path: PathBuf,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// 诊断已绑定路径、登录、exec 与 App Server 能力
+    Doctor(OutputArgs),
+    /// 在指定 Workspace 启动全新的 Codex CLI 或 App Server 任务
+    Run {
+        #[arg(long, value_enum)]
+        surface: CodexRunSurface,
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        document_file: PathBuf,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        source_url: String,
+        /// 从 stdin 读取 Prompt，避免进入 argv 和 shell history
+        #[arg(long)]
+        prompt_stdin: bool,
     },
 }
 
@@ -529,7 +584,88 @@ fn run_agent_command(command: AgentCommand) -> Result<i32, CliError> {
             print_opencode_diagnosis(&diagnosis, output.json)?;
             Ok(i32::from(diagnosis.state != OpenCodeState::Ready))
         }
+        AgentCommand::Codex { command } => run_codex_agent_command(&paths, command),
     }
+}
+
+fn run_codex_agent_command(
+    paths: &AgentFerryPaths,
+    command: CodexCommand,
+) -> Result<i32, CliError> {
+    let (diagnosis, output) = match command {
+        CodexCommand::Detect(output) => (agent_ferry_codex::detect_and_auto_bind(paths)?, output),
+        CodexCommand::Bind { path, output } => (agent_ferry_codex::bind(paths, &path)?, output),
+        CodexCommand::Doctor(output) => (agent_ferry_codex::diagnose_binding(paths)?, output),
+        CodexCommand::Run {
+            surface,
+            workspace,
+            document_file,
+            title,
+            source_url,
+            prompt_stdin,
+        } => {
+            return run_codex_task(
+                paths,
+                surface.into(),
+                &workspace,
+                &document_file,
+                title,
+                source_url,
+                prompt_stdin,
+            );
+        }
+    };
+    print_codex_diagnosis(&diagnosis, output.json)?;
+    Ok(i32::from(diagnosis.state != CodexState::Ready))
+}
+
+fn run_codex_task(
+    paths: &AgentFerryPaths,
+    surface: CodexSurface,
+    workspace: &Path,
+    document_file: &Path,
+    title: String,
+    source_url: String,
+    prompt_stdin: bool,
+) -> Result<i32, CliError> {
+    if !prompt_stdin {
+        return Err(CliError::CodexPromptStdinRequired);
+    }
+    let prompt = read_limited_input(io::stdin().lock())?;
+    let markdown = read_limited_utf8_file(document_file, MAX_CODEX_DOCUMENT_BYTES).map_err(
+        |error| match error {
+            CliError::ClaudeDocumentTooLarge => CliError::CodexDocumentTooLarge,
+            CliError::ClaudeDocumentNotUtf8 => CliError::CodexDocumentNotUtf8,
+            other => other,
+        },
+    )?;
+    let document = CodexDocument {
+        title,
+        source_url,
+        markdown,
+    };
+    agent_ferry_codex::run_task(
+        paths,
+        surface,
+        workspace,
+        &prompt,
+        &document,
+        |event| match event {
+            CodexTaskEvent::Started {
+                thread_id,
+                artifact,
+            } => {
+                println!("Codex Task 已启动: {thread_id}");
+                println!("Artifact: {}", artifact.display());
+            }
+            CodexTaskEvent::Output(text) => print!("{text}"),
+            CodexTaskEvent::Tool(text) => eprintln!("[codex tool] {text}"),
+            CodexTaskEvent::Diagnostic(text) => eprintln!("[codex] {text}"),
+            CodexTaskEvent::Completed(_) => println!("\nCodex Task 已完成"),
+            CodexTaskEvent::Failed(text) => eprintln!("Codex Task 失败: {text}"),
+        },
+    )?;
+    Ok(0)
 }
 
 fn run_opencode_task(
@@ -668,6 +804,34 @@ fn print_opencode_diagnosis(diagnosis: &OpenCodeDiagnosis, json: bool) -> Result
             println!("  安装说明: https://opencode.ai/docs/");
             println!("  安装完成后: aferry agent opencode detect");
         }
+    }
+    Ok(())
+}
+
+fn print_codex_diagnosis(diagnosis: &CodexDiagnosis, json: bool) -> Result<(), CliError> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(diagnosis)?);
+        return Ok(());
+    }
+    println!("Codex: {:?}", diagnosis.state);
+    println!("  {}", diagnosis.detail);
+    if let Some(executable) = &diagnosis.executable {
+        println!("  executable: {}", executable.display());
+    }
+    if let Some(version) = &diagnosis.version {
+        println!("  version: {version}");
+    }
+    println!("  Codex CLI: {}", diagnosis.cli_supported);
+    println!("  Codex App Server: {}", diagnosis.app_server_supported);
+    for candidate in &diagnosis.candidates {
+        println!("  candidate: {}", candidate.display());
+    }
+    if diagnosis.state == CodexState::NotDetected {
+        println!("  Agent Ferry 不会代为安装 Codex；请先安装官方 CLI 或桌面 App");
+    } else if diagnosis.state == CodexState::NeedsSelection {
+        println!("  选择命令: aferry agent codex bind --path <absolute-path>");
+    } else if diagnosis.state == CodexState::NotAuthenticated {
+        println!("  请先运行 codex login，再执行 aferry agent codex doctor");
     }
     Ok(())
 }
@@ -1356,6 +1520,8 @@ enum CliError {
     #[error(transparent)]
     OpenCode(#[from] agent_ferry_opencode::OpenCodeError),
     #[error(transparent)]
+    Codex(#[from] agent_ferry_codex::CodexError),
+    #[error(transparent)]
     Workspace(#[from] agent_ferry_core::workspace::WorkspaceError),
     #[error("未找到 Workspace: {0}")]
     WorkspaceNotFound(String),
@@ -1371,6 +1537,12 @@ enum CliError {
     OpenCodeDocumentTooLarge,
     #[error("OpenCode 文档必须是 UTF-8")]
     OpenCodeDocumentNotUtf8,
+    #[error("请显式传入 --prompt-stdin，Prompt 不允许进入 argv")]
+    CodexPromptStdinRequired,
+    #[error("Codex 文档超过 8 MiB 上限")]
+    CodexDocumentTooLarge,
+    #[error("Codex 文档必须是 UTF-8")]
+    CodexDocumentNotUtf8,
     #[error("Chrome extension id 必须是 32 个 a-p 小写字符")]
     InvalidExtensionId,
     #[error("Native Host 不可执行: {0}")]

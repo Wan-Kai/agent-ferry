@@ -21,7 +21,7 @@ const PROTOCOL_VERSION = 1;
 type HandoffTargetStatus = {
   id: string;
   name: string;
-  kind: "remote_hermes" | "local_open_code" | "local_claude_code";
+  kind: "remote_hermes" | "local_open_code" | "local_claude_code" | "local_codex_cli" | "local_codex_app";
   state: "ready" | "credential_missing" | "authentication_failed" | "connection_failed" | "incompatible";
   capabilities: string[];
 };
@@ -95,6 +95,8 @@ function pdfProgressLabel(progress: ArxivPdfProgress): string {
 function targetAgent(target?: HandoffTargetStatus): { label: string; avatar: string; local: boolean } {
   if (target?.kind === "local_open_code") return { label: "OpenCode", avatar: "OC", local: true };
   if (target?.kind === "local_claude_code") return { label: "Claude Code", avatar: "CC", local: true };
+  if (target?.kind === "local_codex_cli") return { label: "Codex CLI", avatar: "CX", local: true };
+  if (target?.kind === "local_codex_app") return { label: "Codex App", avatar: "CA", local: true };
   return { label: "Hermes", avatar: "H", local: false };
 }
 
@@ -351,12 +353,12 @@ function App() {
         </label>;
       })}</section>}
       {connection.kind === "ready" && <details className="workspace-settings">
-        <summary><span><strong>本地 Agent 启动目录</strong><small>OpenCode 与 Claude Code</small></span><span className="summary-action">配置</span></summary>
+        <summary><span><strong>本地 Agent 启动目录</strong><small>OpenCode、Claude Code 与 Codex</small></span><span className="summary-action">配置</span></summary>
         <div className="workspace-panel">
           <p className="workspace-help">每个目录会生成对应的本地 Agent 目标。Hermes 不使用这里的配置。</p>
           <div className="workspace-list">
             {(connection.result.workspaces ?? []).map((workspace) => <div className="workspace-item" key={workspace.id}>
-              <span className={`workspace-route ${workspace.ready ? "" : "workspace-route-broken"}`} aria-hidden="true">OC · CC</span>
+              <span className={`workspace-route ${workspace.ready ? "" : "workspace-route-broken"}`} aria-hidden="true">4 AGENTS</span>
               <span className="workspace-copy"><strong>{workspace.name}</strong><code title={workspace.path}>{workspace.path}</code></span>
               <button className="workspace-remove" type="button" disabled={workspaceBusy} aria-label={`删除启动目录 ${workspace.name}`} onClick={() => void updateWorkspaces({ type: "workspace_remove", identifier: workspace.id })}>移除</button>
             </div>)}

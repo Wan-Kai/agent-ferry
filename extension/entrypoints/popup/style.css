@@ -347,7 +347,7 @@ h1 {
 
 .workspace-item {
   display: grid;
-  grid-template-columns: 45px minmax(0, 1fr) auto;
+  grid-template-columns: 58px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   padding: 8px 0;

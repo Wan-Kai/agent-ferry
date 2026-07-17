@@ -302,6 +302,8 @@ pub enum HandoffTargetKind {
     RemoteHermes,
     LocalOpenCode,
     LocalClaudeCode,
+    LocalCodexCli,
+    LocalCodexApp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -586,5 +588,19 @@ mod tests {
         bytes.extend_from_slice(b"short");
         let error = read_frame(&mut bytes.as_slice()).expect_err("应拒绝截断消息");
         assert!(matches!(error, FrameError::Io(_)));
+    }
+
+    #[test]
+    fn codex_target_kinds_have_stable_wire_names() {
+        assert_eq!(
+            serde_json::to_string(&HandoffTargetKind::LocalCodexCli)
+                .expect("序列化 Codex CLI kind"),
+            "\"local_codex_cli\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HandoffTargetKind::LocalCodexApp)
+                .expect("序列化 Codex App kind"),
+            "\"local_codex_app\""
+        );
     }
 }

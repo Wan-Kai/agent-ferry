@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use agent_ferry_claude::{ClaudeDocument, ClaudeTaskEvent};
+use agent_ferry_codex::{CodexDocument, CodexSurface, CodexTaskEvent};
 use agent_ferry_core::workspace::{WorkspaceState, diagnose as diagnose_workspace};
 use agent_ferry_core::{AgentFerryPaths, load_or_create_connector_token};
 #[cfg(debug_assertions)]
@@ -50,6 +51,8 @@ const MAX_ACTIVE_HANDOFF_ASSEMBLIES: usize = 8;
 const HANDOFF_ASSEMBLY_TTL: Duration = Duration::from_secs(5 * 60);
 const OPENCODE_TARGET_PREFIX: &str = "opencode-";
 const CLAUDE_TARGET_PREFIX: &str = "claude-";
+const CODEX_CLI_TARGET_PREFIX: &str = "codex-cli-";
+const CODEX_APP_TARGET_PREFIX: &str = "codex-app-";
 enum RuntimeCredentialStore {
     #[cfg(not(debug_assertions))]
     Keychain(KeychainCredentialStore),
@@ -930,6 +933,32 @@ async fn stream_handoff(
         )
         .await;
     }
+    if target_id.starts_with(CODEX_CLI_TARGET_PREFIX) {
+        return stream_codex_updates(
+            stream,
+            request_id,
+            task_id,
+            target_id,
+            prompt,
+            source,
+            paths,
+            CodexSurface::Cli,
+        )
+        .await;
+    }
+    if target_id.starts_with(CODEX_APP_TARGET_PREFIX) {
+        return stream_codex_updates(
+            stream,
+            request_id,
+            task_id,
+            target_id,
+            prompt,
+            source,
+            paths,
+            CodexSurface::App,
+        )
+        .await;
+    }
     let input = match compose_handoff_input(&prompt, &source) {
         Ok(input) => input,
         Err(message) => {
@@ -1225,6 +1254,161 @@ async fn stream_claude_updates(
         };
         if write_async_json(stream, &event).await.is_err() {
             info!(task_id, "浏览器观察者已离开，Claude Code 任务继续执行");
+            return Ok(());
+        }
+        sequence = sequence.saturating_add(1);
+        if terminal {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn stream_codex_updates(
+    stream: &mut UnixStream,
+    request_id: String,
+    task_id: String,
+    target_id: String,
+    prompt: String,
+    source: SourceDocument,
+    paths: &AgentFerryPaths,
+    surface: CodexSurface,
+) -> io::Result<()> {
+    let prefix = match surface {
+        CodexSurface::Cli => CODEX_CLI_TARGET_PREFIX,
+        CodexSurface::App => CODEX_APP_TARGET_PREFIX,
+    };
+    let Some(workspace_id) = target_id.strip_prefix(prefix) else {
+        return Ok(());
+    };
+    let config = match agent_ferry_core::workspace::load(paths) {
+        Ok(config) => config,
+        Err(error) => {
+            return write_async_json(
+                stream,
+                &HostResponse::failure(request_id, ErrorCode::Internal, error.to_string(), false),
+            )
+            .await;
+        }
+    };
+    let Some(workspace) = config
+        .workspaces
+        .into_iter()
+        .find(|workspace| workspace.id == workspace_id)
+    else {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(
+                request_id,
+                ErrorCode::InvalidMessage,
+                "Codex Workspace 不存在",
+                false,
+            ),
+        )
+        .await;
+    };
+    if diagnose_workspace(&workspace).state != WorkspaceState::Ready {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(
+                request_id,
+                ErrorCode::DaemonUnavailable,
+                "Codex Workspace 当前不可用",
+                true,
+            ),
+        )
+        .await;
+    }
+    if prompt.trim().is_empty() || prompt.len() > 16 * 1024 || task_source_invalid(&source) {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(
+                request_id,
+                ErrorCode::InvalidMessage,
+                "Prompt 或页面正文无效",
+                false,
+            ),
+        )
+        .await;
+    }
+
+    let document = CodexDocument {
+        title: source.title,
+        source_url: source.url,
+        markdown: source.markdown,
+    };
+    let paths = paths.clone();
+    let workspace_path = workspace.path;
+    let (sender, mut receiver) = mpsc::channel::<CodexTaskEvent>(64);
+    tokio::task::spawn_blocking(move || {
+        let mut terminal_emitted = false;
+        let result = agent_ferry_codex::run_task(
+            &paths,
+            surface,
+            &workspace_path,
+            &prompt,
+            &document,
+            |event| {
+                terminal_emitted |= matches!(
+                    event,
+                    CodexTaskEvent::Completed(_) | CodexTaskEvent::Failed(_)
+                );
+                let _ = sender.blocking_send(event);
+            },
+        );
+        if let Err(error) = result
+            && !terminal_emitted
+        {
+            let _ = sender.blocking_send(CodexTaskEvent::Failed(error.to_string()));
+        }
+    });
+
+    let mut sequence = 0_u64;
+    while let Some(update) = receiver.recv().await {
+        let (event_kind, text, terminal) = match update {
+            CodexTaskEvent::Started { .. } => (
+                agent_ferry_protocol::HandoffEventKind::Submitted,
+                Some(match surface {
+                    CodexSurface::Cli => "Codex CLI 任务已启动".to_owned(),
+                    CodexSurface::App => "Codex App 任务已启动".to_owned(),
+                }),
+                false,
+            ),
+            CodexTaskEvent::Output(text) => (
+                agent_ferry_protocol::HandoffEventKind::OutputDelta,
+                Some(text),
+                false,
+            ),
+            CodexTaskEvent::Tool(text) => (
+                agent_ferry_protocol::HandoffEventKind::ToolStarted,
+                Some(text),
+                false,
+            ),
+            CodexTaskEvent::Diagnostic(_) => continue,
+            CodexTaskEvent::Completed(text) => (
+                agent_ferry_protocol::HandoffEventKind::Completed,
+                Some(text),
+                true,
+            ),
+            CodexTaskEvent::Failed(text) => (
+                agent_ferry_protocol::HandoffEventKind::Failed,
+                Some(text),
+                true,
+            ),
+        };
+        info!(task_id, target_id, sequence, event = ?event_kind, "转发 Codex 任务事件");
+        let event = HandoffEvent {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: request_id.clone(),
+            task_id: task_id.clone(),
+            sequence,
+            event: event_kind,
+            run_id: None,
+            text,
+        };
+        if write_async_json(stream, &event).await.is_err() {
+            info!(task_id, "浏览器观察者已离开，Codex 任务继续执行");
             return Ok(());
         }
         sequence = sequence.saturating_add(1);
@@ -1676,7 +1860,9 @@ async fn refresh_local_target_cache(
     let opencode = tokio::task::spawn_blocking(move || discover_opencode_targets(&opencode_paths));
     let claude_paths = paths.clone();
     let claude = tokio::task::spawn_blocking(move || discover_claude_targets(&claude_paths));
-    let (opencode, claude) = tokio::join!(opencode, claude);
+    let codex_paths = paths.clone();
+    let codex = tokio::task::spawn_blocking(move || discover_codex_targets(&codex_paths));
+    let (opencode, claude, codex) = tokio::join!(opencode, claude, codex);
     targets.retain(|target| target.kind == HandoffTargetKind::RemoteHermes);
     if targets.is_empty() {
         // Workspace 写入只影响本地目标；首次请求尚无缓存时用持久配置补齐 Hermes，避免为一次目录保存等待远程诊断。
@@ -1689,6 +1875,10 @@ async fn refresh_local_target_cache(
     match claude {
         Ok(claude) => targets.extend(claude),
         Err(error) => warn!(error = %error, "Claude Code 本地目标刷新异常"),
+    }
+    match codex {
+        Ok(codex) => targets.extend(codex),
+        Err(error) => warn!(error = %error, "Codex 本地目标刷新异常"),
     }
 }
 
@@ -1797,6 +1987,70 @@ fn discover_claude_targets(paths: &AgentFerryPaths) -> Vec<HandoffTargetStatus> 
                     Vec::new()
                 },
             }
+        })
+        .collect()
+}
+
+fn discover_codex_targets(paths: &AgentFerryPaths) -> Vec<HandoffTargetStatus> {
+    let config = match agent_ferry_core::workspace::load(paths) {
+        Ok(config) => config,
+        Err(error) => {
+            warn!(error = %error, "无法读取 Workspace 配置");
+            return Vec::new();
+        }
+    };
+    let binding = match agent_ferry_codex::load_binding(paths) {
+        Ok(Some(binding)) => binding,
+        Ok(None) => return Vec::new(),
+        Err(error) => {
+            warn!(error = %error, "无法读取 Codex 绑定");
+            return Vec::new();
+        }
+    };
+    config
+        .workspaces
+        .iter()
+        .flat_map(|workspace| {
+            let workspace_ready = diagnose_workspace(workspace).state == WorkspaceState::Ready;
+            let executable_ready = binding.executable.is_file();
+            let cli_ready = workspace_ready && executable_ready;
+            let app_ready = cli_ready && binding.app_server_supported;
+            [
+                HandoffTargetStatus {
+                    id: format!("{CODEX_CLI_TARGET_PREFIX}{}", workspace.id),
+                    name: format!("Codex CLI · {}", workspace.name),
+                    kind: HandoffTargetKind::LocalCodexCli,
+                    state: if cli_ready {
+                        HandoffTargetState::Ready
+                    } else {
+                        HandoffTargetState::Incompatible
+                    },
+                    capabilities: if cli_ready {
+                        vec!["task.local".to_owned(), "run.events".to_owned()]
+                    } else {
+                        Vec::new()
+                    },
+                },
+                HandoffTargetStatus {
+                    id: format!("{CODEX_APP_TARGET_PREFIX}{}", workspace.id),
+                    name: format!("Codex App · {}", workspace.name),
+                    kind: HandoffTargetKind::LocalCodexApp,
+                    state: if app_ready {
+                        HandoffTargetState::Ready
+                    } else {
+                        HandoffTargetState::Incompatible
+                    },
+                    capabilities: if app_ready {
+                        vec![
+                            "task.local".to_owned(),
+                            "run.events".to_owned(),
+                            "thread.persisted".to_owned(),
+                        ]
+                    } else {
+                        Vec::new()
+                    },
+                },
+            ]
         })
         .collect()
 }
