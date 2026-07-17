@@ -8,15 +8,22 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use agent_ferry_claude::{ClaudeDocument, ClaudeTaskEvent};
+use agent_ferry_core::workspace::{WorkspaceState, diagnose as diagnose_workspace};
 use agent_ferry_core::{AgentFerryPaths, load_or_create_connector_token};
+#[cfg(debug_assertions)]
+use agent_ferry_hermes::DevelopmentCredentialStore;
+#[cfg(not(debug_assertions))]
+use agent_ferry_hermes::KeychainCredentialStore;
 use agent_ferry_hermes::{
-    CredentialStore, DiagnosisState, HermesClient, HermesConnection, KeychainCredentialStore,
-    add_connection, load_connections, remove_connection,
+    CredentialStore, DiagnosisState, HermesClient, HermesConnection, add_connection,
+    load_connections, remove_connection,
 };
+use agent_ferry_opencode::{OpenCodeDocument, OpenCodeTaskEvent};
 use agent_ferry_protocol::{
     Command, ConnectionTransportConfig, ConnectorKind, ErrorCode, HandoffEvent, HandoffTargetKind,
     HandoffTargetState, HandoffTargetStatus, HandoffTransferAck, HandoffTransferPhase, HostRequest,
-    HostResponse, IpcEnvelope, MAX_HANDOFF_CHUNK_BYTES, MAX_HANDOFF_CHUNKS,
+    HostResponse, IpcEnvelope, LocalWorkspaceStatus, MAX_HANDOFF_CHUNK_BYTES, MAX_HANDOFF_CHUNKS,
     MAX_HANDOFF_CONTENT_BYTES, MAX_HERMES_RUN_INPUT_BYTES, MAX_MESSAGE_BYTES, PROTOCOL_VERSION,
     ServiceState, SourceDocument, SourceMetadata, StatusResult,
 };
@@ -25,7 +32,7 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use tracing::{info, warn};
 
 #[derive(Debug)]
@@ -36,10 +43,59 @@ pub struct Daemon {
     chrome_seen: Arc<AtomicBool>,
     hermes_client: Arc<HermesClient>,
     handoff_assemblies: Arc<Mutex<HashMap<String, HandoffAssembly>>>,
+    target_cache: Arc<Mutex<Vec<HandoffTargetStatus>>>,
 }
 
 const MAX_ACTIVE_HANDOFF_ASSEMBLIES: usize = 8;
 const HANDOFF_ASSEMBLY_TTL: Duration = Duration::from_secs(5 * 60);
+const OPENCODE_TARGET_PREFIX: &str = "opencode-";
+const CLAUDE_TARGET_PREFIX: &str = "claude-";
+enum RuntimeCredentialStore {
+    #[cfg(not(debug_assertions))]
+    Keychain(KeychainCredentialStore),
+    #[cfg(debug_assertions)]
+    Development(DevelopmentCredentialStore),
+}
+
+impl CredentialStore for RuntimeCredentialStore {
+    fn set(&self, reference: &str, secret: &[u8]) -> Result<(), agent_ferry_hermes::HermesError> {
+        match self {
+            #[cfg(not(debug_assertions))]
+            Self::Keychain(store) => store.set(reference, secret),
+            #[cfg(debug_assertions)]
+            Self::Development(store) => store.set(reference, secret),
+        }
+    }
+
+    fn get(&self, reference: &str) -> Result<Option<Vec<u8>>, agent_ferry_hermes::HermesError> {
+        match self {
+            #[cfg(not(debug_assertions))]
+            Self::Keychain(store) => store.get(reference),
+            #[cfg(debug_assertions)]
+            Self::Development(store) => store.get(reference),
+        }
+    }
+
+    fn delete(&self, reference: &str) -> Result<(), agent_ferry_hermes::HermesError> {
+        match self {
+            #[cfg(not(debug_assertions))]
+            Self::Keychain(store) => store.delete(reference),
+            #[cfg(debug_assertions)]
+            Self::Development(store) => store.delete(reference),
+        }
+    }
+}
+
+fn runtime_credential_store(paths: &AgentFerryPaths) -> RuntimeCredentialStore {
+    #[cfg(debug_assertions)]
+    return RuntimeCredentialStore::Development(DevelopmentCredentialStore::new(
+        paths.development_credentials.clone(),
+    ));
+    #[cfg(not(debug_assertions))]
+    let _ = paths;
+    #[cfg(not(debug_assertions))]
+    RuntimeCredentialStore::Keychain(KeychainCredentialStore)
+}
 
 struct HandoffAssembly {
     target_id: String,
@@ -101,6 +157,7 @@ impl Daemon {
             chrome_seen: Arc::new(AtomicBool::new(false)),
             hermes_client: Arc::new(hermes_client),
             handoff_assemblies: Arc::new(Mutex::new(HashMap::new())),
+            target_cache: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -119,6 +176,15 @@ impl Daemon {
         F: Future<Output = ()>,
     {
         info!(socket = %self.paths.socket.display(), "agentferryd 已启动");
+        let refresh_paths = self.paths.clone();
+        let refresh_client = Arc::clone(&self.hermes_client);
+        let refresh_cache = Arc::clone(&self.target_cache);
+        let refresh_task = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                refresh_target_cache(&refresh_paths, &refresh_client, &refresh_cache).await;
+            }
+        });
         tokio::pin!(shutdown);
         loop {
             tokio::select! {
@@ -133,6 +199,7 @@ impl Daemon {
                     let paths = self.paths.clone();
                     let hermes_client = Arc::clone(&self.hermes_client);
                     let handoff_assemblies = Arc::clone(&self.handoff_assemblies);
+                    let target_cache = Arc::clone(&self.target_cache);
                     tokio::spawn(async move {
                         if let Err(error) = handle_connection(
                             stream,
@@ -141,6 +208,7 @@ impl Daemon {
                             &paths,
                             &hermes_client,
                             &handoff_assemblies,
+                            &target_cache,
                         ).await {
                             warn!(error = %error, "本地 Connector 请求失败");
                         }
@@ -148,6 +216,7 @@ impl Daemon {
                 }
             }
         }
+        refresh_task.abort();
         if self.paths.socket.exists() {
             std::fs::remove_file(&self.paths.socket)?;
         }
@@ -163,6 +232,7 @@ async fn handle_connection(
     paths: &AgentFerryPaths,
     hermes_client: &HermesClient,
     handoff_assemblies: &Mutex<HashMap<String, HandoffAssembly>>,
+    target_cache: &Mutex<Vec<HandoffTargetStatus>>,
 ) -> io::Result<()> {
     let payload = match read_async_frame(&mut stream).await {
         Ok(payload) => payload,
@@ -336,6 +406,7 @@ async fn handle_connection(
                 chrome_seen,
                 paths,
                 hermes_client,
+                target_cache,
             )
             .await;
             write_async_json(&mut stream, &response).await
@@ -343,12 +414,14 @@ async fn handle_connection(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn dispatch_request(
     request: HostRequest,
     connector: &ConnectorKind,
     chrome_seen: &AtomicBool,
     paths: &AgentFerryPaths,
     hermes_client: &HermesClient,
+    target_cache: &Mutex<Vec<HandoffTargetStatus>>,
 ) -> HostResponse {
     match request.command {
         Command::Status => {
@@ -358,6 +431,7 @@ async fn dispatch_request(
                 chrome_seen,
                 paths,
                 hermes_client,
+                target_cache,
             )
             .await
         }
@@ -385,12 +459,8 @@ async fn dispatch_request(
                 }
             }
             .and_then(|connection| {
-                add_connection(
-                    paths,
-                    &KeychainCredentialStore,
-                    connection,
-                    token.as_bytes(),
-                )
+                let store = runtime_credential_store(paths);
+                add_connection(paths, &store, connection, token.as_bytes())
             });
             if let Err(error) = operation {
                 return HostResponse::failure(
@@ -400,12 +470,14 @@ async fn dispatch_request(
                     false,
                 );
             }
+            refresh_target_cache(paths, hermes_client, target_cache).await;
             status_response(
                 request.request_id,
                 connector,
                 chrome_seen,
                 paths,
                 hermes_client,
+                target_cache,
             )
             .await
         }
@@ -418,7 +490,8 @@ async fn dispatch_request(
                     false,
                 );
             }
-            if let Err(error) = remove_connection(paths, &KeychainCredentialStore, &identifier) {
+            let store = runtime_credential_store(paths);
+            if let Err(error) = remove_connection(paths, &store, &identifier) {
                 return HostResponse::failure(
                     request.request_id,
                     ErrorCode::InvalidMessage,
@@ -426,12 +499,54 @@ async fn dispatch_request(
                     false,
                 );
             }
+            refresh_target_cache(paths, hermes_client, target_cache).await;
             status_response(
                 request.request_id,
                 connector,
                 chrome_seen,
                 paths,
                 hermes_client,
+                target_cache,
+            )
+            .await
+        }
+        Command::WorkspaceAdd { name, path } => {
+            if let Err(error) = agent_ferry_core::workspace::add(paths, &name, Path::new(&path)) {
+                return HostResponse::failure(
+                    request.request_id,
+                    ErrorCode::InvalidMessage,
+                    error.to_string(),
+                    false,
+                );
+            }
+            refresh_local_target_cache(paths, target_cache).await;
+            status_response(
+                request.request_id,
+                connector,
+                chrome_seen,
+                paths,
+                hermes_client,
+                target_cache,
+            )
+            .await
+        }
+        Command::WorkspaceRemove { identifier } => {
+            if let Err(error) = agent_ferry_core::workspace::remove(paths, &identifier) {
+                return HostResponse::failure(
+                    request.request_id,
+                    ErrorCode::InvalidMessage,
+                    error.to_string(),
+                    false,
+                );
+            }
+            refresh_local_target_cache(paths, target_cache).await;
+            status_response(
+                request.request_id,
+                connector,
+                chrome_seen,
+                paths,
+                hermes_client,
+                target_cache,
             )
             .await
         }
@@ -477,6 +592,8 @@ fn decode_request(value: Value) -> Result<HostRequest, HostResponse> {
             "status"
                 | "connection_add"
                 | "connection_remove"
+                | "workspace_add"
+                | "workspace_remove"
                 | "hermes_run"
                 | "handoff"
                 | "handoff_begin"
@@ -801,6 +918,18 @@ async fn stream_handoff(
         )
         .await;
     }
+    if target_id.starts_with(OPENCODE_TARGET_PREFIX) {
+        return stream_opencode_updates(
+            stream, request_id, task_id, target_id, prompt, source, paths,
+        )
+        .await;
+    }
+    if target_id.starts_with(CLAUDE_TARGET_PREFIX) {
+        return stream_claude_updates(
+            stream, request_id, task_id, target_id, prompt, source, paths,
+        )
+        .await;
+    }
     let input = match compose_handoff_input(&prompt, &source) {
         Ok(input) => input,
         Err(message) => {
@@ -821,6 +950,289 @@ async fn stream_handoff(
         hermes_client,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn stream_opencode_updates(
+    stream: &mut UnixStream,
+    request_id: String,
+    task_id: String,
+    target_id: String,
+    prompt: String,
+    source: SourceDocument,
+    paths: &AgentFerryPaths,
+) -> io::Result<()> {
+    let Some(workspace_id) = target_id.strip_prefix(OPENCODE_TARGET_PREFIX) else {
+        return Ok(());
+    };
+    let config = match agent_ferry_core::workspace::load(paths) {
+        Ok(config) => config,
+        Err(error) => {
+            return write_async_json(
+                stream,
+                &HostResponse::failure(request_id, ErrorCode::Internal, error.to_string(), false),
+            )
+            .await;
+        }
+    };
+    let Some(workspace) = config
+        .workspaces
+        .into_iter()
+        .find(|workspace| workspace.id == workspace_id)
+    else {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(
+                request_id,
+                ErrorCode::InvalidMessage,
+                "OpenCode Workspace 不存在",
+                false,
+            ),
+        )
+        .await;
+    };
+    if diagnose_workspace(&workspace).state != WorkspaceState::Ready {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(
+                request_id,
+                ErrorCode::DaemonUnavailable,
+                "OpenCode Workspace 当前不可用",
+                true,
+            ),
+        )
+        .await;
+    }
+    if prompt.trim().is_empty() || prompt.len() > 16 * 1024 || task_source_invalid(&source) {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(
+                request_id,
+                ErrorCode::InvalidMessage,
+                "Prompt 或页面正文无效",
+                false,
+            ),
+        )
+        .await;
+    }
+
+    let document = OpenCodeDocument {
+        title: source.title,
+        source_url: source.url,
+        markdown: source.markdown,
+    };
+    let paths = paths.clone();
+    let workspace_path = workspace.path;
+    let (sender, mut receiver) = mpsc::channel::<OpenCodeTaskEvent>(64);
+    tokio::task::spawn_blocking(move || {
+        let mut terminal_emitted = false;
+        let result =
+            agent_ferry_opencode::run_task(&paths, &workspace_path, &prompt, &document, |event| {
+                terminal_emitted |= matches!(
+                    event,
+                    OpenCodeTaskEvent::Completed(_) | OpenCodeTaskEvent::Failed(_)
+                );
+                let _ = sender.blocking_send(event);
+            });
+        if let Err(error) = result
+            && !terminal_emitted
+        {
+            let _ = sender.blocking_send(OpenCodeTaskEvent::Failed(error.to_string()));
+        }
+    });
+
+    let mut sequence = 0_u64;
+    while let Some(update) = receiver.recv().await {
+        let (event_kind, text, terminal) = match update {
+            OpenCodeTaskEvent::Started { .. } => (
+                agent_ferry_protocol::HandoffEventKind::Submitted,
+                Some("OpenCode 任务已启动".to_owned()),
+                false,
+            ),
+            OpenCodeTaskEvent::Output(text) => (
+                agent_ferry_protocol::HandoffEventKind::OutputDelta,
+                Some(text),
+                false,
+            ),
+            OpenCodeTaskEvent::Tool(text) => (
+                agent_ferry_protocol::HandoffEventKind::ToolStarted,
+                Some(text),
+                false,
+            ),
+            OpenCodeTaskEvent::Diagnostic(_) => continue,
+            OpenCodeTaskEvent::Completed(text) => (
+                agent_ferry_protocol::HandoffEventKind::Completed,
+                Some(text),
+                true,
+            ),
+            OpenCodeTaskEvent::Failed(text) => (
+                agent_ferry_protocol::HandoffEventKind::Failed,
+                Some(text),
+                true,
+            ),
+        };
+        info!(task_id, target_id, sequence, event = ?event_kind, "转发 OpenCode 任务事件");
+        let event = HandoffEvent {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: request_id.clone(),
+            task_id: task_id.clone(),
+            sequence,
+            event: event_kind,
+            run_id: None,
+            text,
+        };
+        if write_async_json(stream, &event).await.is_err() {
+            // 本地 Agent 由 daemon 持有；弹窗关闭只丢弃实时展示，不能改变任务执行语义。
+            info!(task_id, "浏览器观察者已离开，OpenCode 任务继续执行");
+            return Ok(());
+        }
+        sequence = sequence.saturating_add(1);
+        if terminal {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn stream_claude_updates(
+    stream: &mut UnixStream,
+    request_id: String,
+    task_id: String,
+    target_id: String,
+    prompt: String,
+    source: SourceDocument,
+    paths: &AgentFerryPaths,
+) -> io::Result<()> {
+    let Some(workspace_id) = target_id.strip_prefix(CLAUDE_TARGET_PREFIX) else {
+        return Ok(());
+    };
+    let config = match agent_ferry_core::workspace::load(paths) {
+        Ok(config) => config,
+        Err(error) => {
+            return write_async_json(
+                stream,
+                &HostResponse::failure(request_id, ErrorCode::Internal, error.to_string(), false),
+            )
+            .await;
+        }
+    };
+    let Some(workspace) = config
+        .workspaces
+        .into_iter()
+        .find(|workspace| workspace.id == workspace_id)
+    else {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(
+                request_id,
+                ErrorCode::InvalidMessage,
+                "Claude Code Workspace 不存在",
+                false,
+            ),
+        )
+        .await;
+    };
+    if diagnose_workspace(&workspace).state != WorkspaceState::Ready {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(
+                request_id,
+                ErrorCode::DaemonUnavailable,
+                "Claude Code Workspace 当前不可用",
+                true,
+            ),
+        )
+        .await;
+    }
+    if prompt.trim().is_empty() || prompt.len() > 16 * 1024 || task_source_invalid(&source) {
+        return write_async_json(
+            stream,
+            &HostResponse::failure(
+                request_id,
+                ErrorCode::InvalidMessage,
+                "Prompt 或页面正文无效",
+                false,
+            ),
+        )
+        .await;
+    }
+
+    let document = ClaudeDocument {
+        title: source.title,
+        source_url: source.url,
+        markdown: source.markdown,
+    };
+    let paths = paths.clone();
+    let workspace_path = workspace.path;
+    let (sender, mut receiver) = mpsc::channel::<ClaudeTaskEvent>(64);
+    tokio::task::spawn_blocking(move || {
+        let mut terminal_emitted = false;
+        let result = agent_ferry_claude::run_print_task(
+            &paths,
+            &workspace_path,
+            &prompt,
+            &document,
+            |event| {
+                terminal_emitted |= matches!(
+                    event,
+                    ClaudeTaskEvent::Completed(_) | ClaudeTaskEvent::Failed(_)
+                );
+                let _ = sender.blocking_send(event);
+            },
+        );
+        if let Err(error) = result
+            && !terminal_emitted
+        {
+            let _ = sender.blocking_send(ClaudeTaskEvent::Failed(error.to_string()));
+        }
+    });
+
+    let mut sequence = 0_u64;
+    while let Some(update) = receiver.recv().await {
+        let (event_kind, text, terminal) = match update {
+            ClaudeTaskEvent::Started { .. } => (
+                agent_ferry_protocol::HandoffEventKind::Submitted,
+                Some("Claude Code 任务已启动".to_owned()),
+                false,
+            ),
+            ClaudeTaskEvent::Output(text) => (
+                agent_ferry_protocol::HandoffEventKind::OutputDelta,
+                Some(text),
+                false,
+            ),
+            ClaudeTaskEvent::Diagnostic(_) => continue,
+            ClaudeTaskEvent::Completed(text) => (
+                agent_ferry_protocol::HandoffEventKind::Completed,
+                Some(text),
+                true,
+            ),
+            ClaudeTaskEvent::Failed(text) => (
+                agent_ferry_protocol::HandoffEventKind::Failed,
+                Some(text),
+                true,
+            ),
+        };
+        info!(task_id, target_id, sequence, event = ?event_kind, "转发 Claude Code 任务事件");
+        let event = HandoffEvent {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: request_id.clone(),
+            task_id: task_id.clone(),
+            sequence,
+            event: event_kind,
+            run_id: None,
+            text,
+        };
+        if write_async_json(stream, &event).await.is_err() {
+            info!(task_id, "浏览器观察者已离开，Claude Code 任务继续执行");
+            return Ok(());
+        }
+        sequence = sequence.saturating_add(1);
+        if terminal {
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -918,7 +1330,7 @@ async fn stream_hermes_updates(
         )
         .await;
     };
-    let token = match KeychainCredentialStore.get(&connection.credential_ref) {
+    let token = match runtime_credential_store(paths).get(&connection.credential_ref) {
         Ok(Some(token)) => token,
         Ok(None) => {
             return write_async_json(
@@ -926,7 +1338,7 @@ async fn stream_hermes_updates(
                 &HostResponse::failure(
                     request_id,
                     ErrorCode::PermissionDenied,
-                    "目标 Hermes 的 Keychain 凭据不存在",
+                    "目标 Hermes 的凭据不存在",
                     false,
                 ),
             )
@@ -1167,8 +1579,31 @@ async fn status_response(
     chrome_seen: &AtomicBool,
     paths: &AgentFerryPaths,
     hermes_client: &HermesClient,
+    target_cache: &Mutex<Vec<HandoffTargetStatus>>,
 ) -> HostResponse {
-    let targets = discover_hermes_targets(paths, hermes_client).await;
+    if target_cache.lock().await.is_empty() {
+        // 首次 Status 完成一次真实诊断；之后弹窗只读缓存，避免每次打开都重复建立 SSH Tunnel。
+        refresh_target_cache(paths, hermes_client, target_cache).await;
+    }
+    let targets = target_cache.lock().await.clone();
+    let workspaces = agent_ferry_core::workspace::load(paths)
+        .map(|config| {
+            config
+                .workspaces
+                .into_iter()
+                .map(|workspace| {
+                    let ready = diagnose_workspace(&workspace).state == WorkspaceState::Ready;
+                    LocalWorkspaceStatus {
+                        id: workspace.id,
+                        name: workspace.name,
+                        path: workspace.path.to_string_lossy().into_owned(),
+                        ready,
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        })
+        .unwrap_or_default();
     HostResponse::success(
         request_id,
         StatusResult {
@@ -1190,10 +1625,180 @@ async fn status_response(
                 "target.read".to_owned(),
                 "handoff.submit".to_owned(),
                 "handoff.chunked".to_owned(),
+                "workspace.write".to_owned(),
             ],
-            targets,
+            targets: targets.into_boxed_slice(),
+            workspaces,
         },
     )
+}
+
+async fn refresh_target_cache(
+    paths: &AgentFerryPaths,
+    hermes_client: &HermesClient,
+    target_cache: &Mutex<Vec<HandoffTargetStatus>>,
+) {
+    let hermes_paths = paths.clone();
+    let hermes_client = hermes_client.clone();
+    let mut hermes =
+        tokio::spawn(async move { discover_hermes_targets(&hermes_paths, &hermes_client).await });
+    let hermes_result = tokio::time::timeout(Duration::from_secs(8), &mut hermes).await;
+    let remote_targets = match hermes_result {
+        Ok(Ok(targets)) => targets,
+        Ok(Err(error)) => {
+            warn!(error = %error, "Hermes 后台目标诊断异常，使用已配置目标");
+            configured_hermes_targets(paths)
+        }
+        Err(_) => {
+            hermes.abort();
+            // 弹窗选择不应被 SSH 建连拖住；真正提交任务时仍会重新验证服务端能力与凭据。
+            warn!("Hermes 后台目标诊断超过 8 秒，使用已配置目标");
+            configured_hermes_targets(paths)
+        }
+    };
+    {
+        let mut targets = target_cache.lock().await;
+        // 远程刷新只替换 Hermes 分区，不能覆盖刷新期间由用户刚保存的本地 Workspace 目标。
+        targets.retain(|target| target.kind != HandoffTargetKind::RemoteHermes);
+        targets.splice(0..0, remote_targets);
+    }
+    // 远程诊断可能等待数秒；完成后重新读取一次本地配置，确保这里使用最新 Workspace 快照。
+    refresh_local_target_cache(paths, target_cache).await;
+}
+
+async fn refresh_local_target_cache(
+    paths: &AgentFerryPaths,
+    target_cache: &Mutex<Vec<HandoffTargetStatus>>,
+) {
+    // 本地发现只做私有配置读取与文件存在性检查，耗时很短；在同一锁内完成读取和提交，避免旧快照晚于新快照覆盖。
+    let mut targets = target_cache.lock().await;
+    let opencode_paths = paths.clone();
+    let opencode = tokio::task::spawn_blocking(move || discover_opencode_targets(&opencode_paths));
+    let claude_paths = paths.clone();
+    let claude = tokio::task::spawn_blocking(move || discover_claude_targets(&claude_paths));
+    let (opencode, claude) = tokio::join!(opencode, claude);
+    targets.retain(|target| target.kind == HandoffTargetKind::RemoteHermes);
+    if targets.is_empty() {
+        // Workspace 写入只影响本地目标；首次请求尚无缓存时用持久配置补齐 Hermes，避免为一次目录保存等待远程诊断。
+        targets.extend(configured_hermes_targets(paths));
+    }
+    match opencode {
+        Ok(opencode) => targets.extend(opencode),
+        Err(error) => warn!(error = %error, "OpenCode 本地目标刷新异常"),
+    }
+    match claude {
+        Ok(claude) => targets.extend(claude),
+        Err(error) => warn!(error = %error, "Claude Code 本地目标刷新异常"),
+    }
+}
+
+fn configured_hermes_targets(paths: &AgentFerryPaths) -> Vec<HandoffTargetStatus> {
+    let Ok(connections) = load_connections(&paths.hermes_connections) else {
+        return Vec::new();
+    };
+    connections
+        .connections
+        .into_iter()
+        .map(|connection| {
+            HandoffTargetStatus {
+                id: connection.id,
+                name: connection.name,
+                kind: HandoffTargetKind::RemoteHermes,
+                // credential_ref 已在配置写入时验证；真正提交任务时仍会从运行时凭据后端读取并做在线诊断。
+                state: HandoffTargetState::Ready,
+                capabilities: vec![
+                    "run.submit".to_owned(),
+                    "run.status".to_owned(),
+                    "run.events_sse".to_owned(),
+                    "status.cached".to_owned(),
+                ],
+            }
+        })
+        .collect()
+}
+
+fn discover_opencode_targets(paths: &AgentFerryPaths) -> Vec<HandoffTargetStatus> {
+    let config = match agent_ferry_core::workspace::load(paths) {
+        Ok(config) => config,
+        Err(error) => {
+            warn!(error = %error, "无法读取 Workspace 配置");
+            return Vec::new();
+        }
+    };
+    let binding = match agent_ferry_opencode::load_binding(paths) {
+        Ok(Some(binding)) => binding,
+        Ok(None) => return Vec::new(),
+        Err(error) => {
+            warn!(error = %error, "无法读取 OpenCode 绑定");
+            return Vec::new();
+        }
+    };
+    config
+        .workspaces
+        .iter()
+        .map(|workspace| {
+            let workspace_ready = diagnose_workspace(workspace).state == WorkspaceState::Ready;
+            // Status 只验证固定绑定仍指向文件；完整 flags/model 诊断留在任务启动，避免弹窗被 CLI 探测阻塞。
+            let ready = workspace_ready && binding.executable.is_file();
+            HandoffTargetStatus {
+                id: format!("{OPENCODE_TARGET_PREFIX}{}", workspace.id),
+                name: format!("OpenCode · {}", workspace.name),
+                kind: HandoffTargetKind::LocalOpenCode,
+                state: if ready {
+                    HandoffTargetState::Ready
+                } else {
+                    HandoffTargetState::Incompatible
+                },
+                capabilities: if ready {
+                    vec!["task.local".to_owned(), "run.events".to_owned()]
+                } else {
+                    Vec::new()
+                },
+            }
+        })
+        .collect()
+}
+
+fn discover_claude_targets(paths: &AgentFerryPaths) -> Vec<HandoffTargetStatus> {
+    let config = match agent_ferry_core::workspace::load(paths) {
+        Ok(config) => config,
+        Err(error) => {
+            warn!(error = %error, "无法读取 Workspace 配置");
+            return Vec::new();
+        }
+    };
+    let binding = match agent_ferry_claude::load_binding(paths) {
+        Ok(Some(binding)) => binding,
+        Ok(None) => return Vec::new(),
+        Err(error) => {
+            warn!(error = %error, "无法读取 Claude Code 绑定");
+            return Vec::new();
+        }
+    };
+    config
+        .workspaces
+        .iter()
+        .map(|workspace| {
+            let workspace_ready = diagnose_workspace(workspace).state == WorkspaceState::Ready;
+            // 完整 CLI 与认证诊断在真实任务启动时执行；Status 只确认固定绑定仍存在，保持弹窗即时响应。
+            let ready = workspace_ready && binding.executable.is_file();
+            HandoffTargetStatus {
+                id: format!("{CLAUDE_TARGET_PREFIX}{}", workspace.id),
+                name: format!("Claude Code · {}", workspace.name),
+                kind: HandoffTargetKind::LocalClaudeCode,
+                state: if ready {
+                    HandoffTargetState::Ready
+                } else {
+                    HandoffTargetState::Incompatible
+                },
+                capabilities: if ready {
+                    vec!["task.local".to_owned(), "run.events".to_owned()]
+                } else {
+                    Vec::new()
+                },
+            }
+        })
+        .collect()
 }
 
 async fn discover_hermes_targets(
@@ -1207,7 +1812,7 @@ async fn discover_hermes_targets(
             return Vec::new();
         }
     };
-    let store = KeychainCredentialStore;
+    let store = runtime_credential_store(paths);
     let mut targets = Vec::with_capacity(connections.connections.len());
     for connection in connections.connections {
         let diagnosis = match client.diagnose_with_store(&connection, &store).await {

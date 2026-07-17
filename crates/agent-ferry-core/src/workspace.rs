@@ -4,6 +4,7 @@ use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{AgentFerryPaths, CoreError};
 
@@ -86,6 +87,7 @@ pub fn add(
     if !canonical.is_dir() {
         return Err(WorkspaceError::NotDirectory(canonical));
     }
+    let _lock = lock_config(paths)?;
     let mut config = load(paths)?;
     if config.workspaces.iter().any(|item| item.name == name) {
         return Err(WorkspaceError::DuplicateName(name.to_owned()));
@@ -109,6 +111,7 @@ pub fn add(
 ///
 /// 配置不可读、目标不存在或配置无法保存时返回错误。
 pub fn remove(paths: &AgentFerryPaths, identifier: &str) -> Result<Workspace, WorkspaceError> {
+    let _lock = lock_config(paths)?;
     let mut config = load(paths)?;
     let index = config
         .workspaces
@@ -144,15 +147,29 @@ pub fn diagnose(workspace: &Workspace) -> WorkspaceDiagnosis {
 
 fn save(paths: &AgentFerryPaths, config: &WorkspaceConfig) -> Result<(), WorkspaceError> {
     paths.ensure_private_config()?;
-    let temporary = paths.workspaces.with_extension("json.tmp");
+    let temporary = paths
+        .workspaces
+        .with_extension(format!("json.tmp-{}", Uuid::new_v4()));
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true).mode(0o600);
+    options.write(true).create_new(true).mode(0o600);
     let mut file = options.open(&temporary)?;
     file.write_all(&serde_json::to_vec_pretty(config)?)?;
     file.sync_all()?;
     fs::rename(&temporary, &paths.workspaces)?;
     fs::set_permissions(&paths.workspaces, fs::Permissions::from_mode(0o600))?;
     Ok(())
+}
+
+fn lock_config(paths: &AgentFerryPaths) -> Result<fs::File, WorkspaceError> {
+    paths.ensure_private_config()?;
+    let lock_path = paths.workspaces.with_extension("lock");
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).mode(0o600);
+    let file = options.open(lock_path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    // 锁覆盖完整 read-modify-write 事务；只锁 save 仍会让两个进程基于同一旧快照互相覆盖。
+    fs2::FileExt::lock_exclusive(&file)?;
+    Ok(file)
 }
 
 fn validate_name(name: &str) -> Result<(), WorkspaceError> {
@@ -188,4 +205,35 @@ pub enum WorkspaceError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+
+    use super::*;
+
+    #[test]
+    fn concurrent_writers_keep_every_successful_workspace() {
+        let root = std::env::temp_dir().join(format!("af-workspace-lock-{}", Uuid::new_v4()));
+        let paths = AgentFerryPaths::from_root(root.join("ferry"));
+        let barrier = Arc::new(Barrier::new(10));
+        let mut workers = Vec::new();
+        for index in 0..10 {
+            let paths = paths.clone();
+            let barrier = Arc::clone(&barrier);
+            let directory = root.join(format!("project-{index}"));
+            fs::create_dir_all(&directory).expect("创建并发测试目录");
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                add(&paths, &format!("project-{index}"), &directory).expect("并发添加应成功")
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("并发线程正常结束");
+        }
+        let config = load(&paths).expect("读取最终 Workspace 配置");
+        assert_eq!(config.workspaces.len(), 10);
+        fs::remove_dir_all(root).expect("清理并发测试目录");
+    }
 }

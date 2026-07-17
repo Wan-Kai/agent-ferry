@@ -12,6 +12,8 @@ use agent_ferry_core::{
     send_ipc_request,
 };
 use agent_ferry_hermes::{ConnectionDiagnosis, DiagnosisState, load_connections};
+#[cfg(debug_assertions)]
+use agent_ferry_hermes::{CredentialStore, DevelopmentCredentialStore, KeychainCredentialStore};
 use agent_ferry_opencode::{
     DEFAULT_OPENCODE_MODEL, MAX_OPENCODE_DOCUMENT_BYTES, OpenCodeDiagnosis, OpenCodeDocument,
     OpenCodeState, OpenCodeTaskEvent,
@@ -60,6 +62,19 @@ enum CliCommand {
         #[command(subcommand)]
         command: WorkspaceCommand,
     },
+    /// 仅 Debug 构建提供的本地开发辅助命令
+    #[cfg(debug_assertions)]
+    Dev {
+        #[command(subcommand)]
+        command: DevCommand,
+    },
+}
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Subcommand)]
+enum DevCommand {
+    /// 将已配置 Hermes 的凭据复制到私有开发文件
+    CacheHermesCredentials,
 }
 
 #[derive(Debug, Subcommand)]
@@ -339,6 +354,34 @@ fn run(cli: Cli) -> Result<i32, CliError> {
         Some(CliCommand::Connection { command }) => run_connection_command(command),
         Some(CliCommand::Agent { command }) => run_agent_command(command),
         Some(CliCommand::Workspace { command }) => run_workspace_command(command),
+        #[cfg(debug_assertions)]
+        Some(CliCommand::Dev { command }) => run_dev_command(&command),
+    }
+}
+
+#[cfg(debug_assertions)]
+fn run_dev_command(command: &DevCommand) -> Result<i32, CliError> {
+    match command {
+        DevCommand::CacheHermesCredentials => {
+            let paths = AgentFerryPaths::discover()?;
+            let source = KeychainCredentialStore;
+            let destination =
+                DevelopmentCredentialStore::new(paths.development_credentials.clone());
+            let connections = load_connections(&paths.hermes_connections)?;
+            let mut copied = 0usize;
+            for connection in connections.connections {
+                let secret = source
+                    .get(&connection.credential_ref)?
+                    .ok_or_else(|| CliError::MissingHermesCredential(connection.name.clone()))?;
+                destination.set(&connection.credential_ref, &secret)?;
+                copied += 1;
+            }
+            println!(
+                "已缓存 {copied} 个 Hermes 开发凭据到 {}",
+                paths.development_credentials.display()
+            );
+            Ok(0)
+        }
     }
 }
 
@@ -662,7 +705,7 @@ fn collect_report() -> Result<SetupReport, CliError> {
                 state: CheckState::NotDetected,
                 detail: "daemon 不可用，无法确认扩展连接".to_owned(),
             },
-            Vec::new(),
+            Vec::new().into_boxed_slice(),
         ),
     };
 
@@ -1340,6 +1383,9 @@ enum CliError {
     TokenNotUtf8,
     #[error("Hermes Bearer Token 超过 16 KiB 上限")]
     TokenTooLarge,
+    #[cfg(debug_assertions)]
+    #[error("Hermes Connection 缺少钥匙串凭据: {0}")]
+    MissingHermesCredential(String),
     #[error("请使用 --input-file 或 --input-stdin 提供 Hermes Run input")]
     RunInputRequired,
     #[error("Hermes Run input 不能为空")]

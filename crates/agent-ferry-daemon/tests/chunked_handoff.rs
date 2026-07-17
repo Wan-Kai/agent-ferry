@@ -7,7 +7,7 @@ use std::time::Duration;
 use agent_ferry_core::{AgentFerryPaths, load_connector_token};
 use agent_ferry_daemon::Daemon;
 use agent_ferry_hermes::{
-    HermesConnection, KeychainCredentialStore, add_connection, remove_connection,
+    DevelopmentCredentialStore, HermesConnection, add_connection, remove_connection,
 };
 use agent_ferry_protocol::{
     ConnectorKind, ErrorCode, HandoffEvent, HandoffEventKind, HandoffTransferAck,
@@ -42,13 +42,9 @@ impl TestDaemon {
         let connection = HermesConnection::direct("chunked-e2e", base_url, None)
             .expect("创建临时 Hermes Connection");
         let connection_id = connection.id.clone();
-        add_connection(
-            &paths,
-            &KeychainCredentialStore,
-            connection,
-            b"chunked-e2e-secret",
-        )
-        .expect("保存临时 Connection 与 Keychain token");
+        let store = DevelopmentCredentialStore::new(paths.development_credentials.clone());
+        add_connection(&paths, &store, connection, b"chunked-e2e-secret")
+            .expect("保存临时 Connection 与开发凭据");
 
         let daemon = Daemon::bind(paths.clone()).expect("绑定 daemon");
         let token = load_connector_token(&paths).expect("读取 Connector token");
@@ -77,7 +73,8 @@ impl TestDaemon {
             .await
             .expect("等待 daemon task")
             .expect("daemon 正常退出");
-        remove_connection(&self.paths, &KeychainCredentialStore, &self.connection_id)
+        let store = DevelopmentCredentialStore::new(self.paths.development_credentials.clone());
+        remove_connection(&self.paths, &store, &self.connection_id)
             .expect("删除临时 Hermes Connection");
         fs::remove_dir_all(&self.paths.root).expect("清理测试目录");
     }

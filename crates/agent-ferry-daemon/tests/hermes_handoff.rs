@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use agent_ferry_core::{AgentFerryPaths, load_connector_token};
 use agent_ferry_daemon::Daemon;
 use agent_ferry_hermes::{
-    CredentialStore, HermesConnection, KeychainCredentialStore, add_connection, remove_connection,
+    CredentialStore, DevelopmentCredentialStore, HermesConnection, add_connection,
+    remove_connection,
 };
 use agent_ferry_protocol::{
     ConnectorKind, HandoffEvent, HandoffEventKind, IpcEnvelope, read_json_frame, write_json_frame,
@@ -27,9 +28,8 @@ struct ConnectionCleanup {
 
 impl Drop for ConnectionCleanup {
     fn drop(&mut self) {
-        // 测试使用真实 macOS Keychain，失败或 panic 时也必须尽力删除临时凭据，
-        // 否则重复运行会在用户钥匙串中积累无意义项目。
-        let _ = remove_connection(&self.paths, &KeychainCredentialStore, &self.connection_id);
+        let store = DevelopmentCredentialStore::new(self.paths.development_credentials.clone());
+        let _ = remove_connection(&self.paths, &store, &self.connection_id);
         let _ = fs::remove_dir_all(&self.paths.root);
     }
 }
@@ -140,13 +140,9 @@ async fn chrome_handoff_streams_ordered_events_and_submits_complete_page() {
         .expect("创建临时 Hermes Connection");
     let connection_id = connection.id.clone();
     let credential_ref = connection.credential_ref.clone();
-    add_connection(
-        &paths,
-        &KeychainCredentialStore,
-        connection,
-        b"daemon-e2e-secret",
-    )
-    .expect("保存临时 Connection 与 Keychain token");
+    let store = DevelopmentCredentialStore::new(paths.development_credentials.clone());
+    add_connection(&paths, &store, connection, b"daemon-e2e-secret")
+        .expect("保存临时 Connection 与开发凭据");
     let cleanup = ConnectionCleanup {
         paths: paths.clone(),
         connection_id: connection_id.clone(),
@@ -245,10 +241,10 @@ async fn chrome_handoff_streams_ordered_events_and_submits_complete_page() {
 
     drop(cleanup);
     assert!(
-        KeychainCredentialStore
+        DevelopmentCredentialStore::new(paths.development_credentials.clone())
             .get(&credential_ref)
-            .expect("检查临时 Keychain token")
+            .expect("检查临时开发凭据")
             .is_none(),
-        "测试结束后必须删除临时 Keychain token"
+        "测试结束后必须删除临时开发凭据"
     );
 }

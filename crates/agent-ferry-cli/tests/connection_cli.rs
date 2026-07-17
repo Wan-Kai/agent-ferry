@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use agent_ferry_core::AgentFerryPaths;
 use agent_ferry_daemon::Daemon;
 use agent_ferry_hermes::{
-    HermesConnection, KeychainCredentialStore, add_connection, remove_connection,
+    DevelopmentCredentialStore, HermesConnection, add_connection, remove_connection,
 };
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -262,13 +262,8 @@ async fn cli_run_submits_input_and_streams_logs_until_terminal() {
     let (url, server) = spawn_fake_hermes_run();
     let connection = HermesConnection::direct("cli-run-e2e", &url, None).expect("创建 Connection");
     let connection_id = connection.id.clone();
-    add_connection(
-        &paths,
-        &KeychainCredentialStore,
-        connection,
-        b"cli-run-secret",
-    )
-    .expect("保存 Connection");
+    let store = DevelopmentCredentialStore::new(paths.development_credentials.clone());
+    add_connection(&paths, &store, connection, b"cli-run-secret").expect("保存 Connection");
 
     let daemon = Daemon::bind(paths.clone()).expect("绑定 daemon");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -315,6 +310,6 @@ async fn cli_run_submits_input_and_streams_logs_until_terminal() {
         .await
         .expect("等待 daemon task")
         .expect("daemon 正常退出");
-    remove_connection(&paths, &KeychainCredentialStore, &connection_id).expect("清理 Connection");
+    remove_connection(&paths, &store, &connection_id).expect("清理 Connection");
     fs::remove_dir_all(root).expect("清理测试目录");
 }

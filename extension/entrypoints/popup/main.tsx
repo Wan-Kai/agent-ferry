@@ -21,14 +21,16 @@ const PROTOCOL_VERSION = 1;
 type HandoffTargetStatus = {
   id: string;
   name: string;
-  kind: "remote_hermes";
+  kind: "remote_hermes" | "local_open_code" | "local_claude_code";
   state: "ready" | "credential_missing" | "authentication_failed" | "connection_failed" | "incompatible";
   capabilities: string[];
 };
+type LocalWorkspaceStatus = { id: string; name: string; path: string; ready: boolean };
 type StatusResult = {
   core_version: string;
   daemon: "ready" | "not_detected";
   targets?: HandoffTargetStatus[];
+  workspaces?: LocalWorkspaceStatus[];
 };
 type HostResponse = {
   protocol_version: number;
@@ -58,6 +60,7 @@ type ConnectionState =
   | { kind: "unavailable"; detail: string };
 type RunState = { kind: "idle" } | { kind: "capturing"; label: string } | { kind: "running" | "done" | "failed"; label: string; output: string };
 type TemplateDraft = { id?: string; name: string; content: string };
+type WorkspaceDraft = { name: string; path: string };
 type ChromeScriptingApi = {
   scripting: {
     executeScript(options: { target: { tabId: number }; files: string[] }): Promise<Array<{ result?: unknown; error?: string }>>;
@@ -89,6 +92,12 @@ function pdfProgressLabel(progress: ArxivPdfProgress): string {
   return `正在下载 PDF ${loaded} MiB`;
 }
 
+function targetAgent(target?: HandoffTargetStatus): { label: string; avatar: string; local: boolean } {
+  if (target?.kind === "local_open_code") return { label: "OpenCode", avatar: "OC", local: true };
+  if (target?.kind === "local_claude_code") return { label: "Claude Code", avatar: "CC", local: true };
+  return { label: "Hermes", avatar: "H", local: false };
+}
+
 function App() {
   const [connection, setConnection] = useState<ConnectionState>({ kind: "checking" });
   const [selectedTarget, setSelectedTarget] = useState("");
@@ -97,10 +106,17 @@ function App() {
   const [templateSettings, setTemplateSettings] = useState<PromptTemplateSettings>(EMPTY_PROMPT_TEMPLATE_SETTINGS);
   const [templateDraft, setTemplateDraft] = useState<TemplateDraft | null>(null);
   const [templateError, setTemplateError] = useState("");
+  const [workspaceDraft, setWorkspaceDraft] = useState<WorkspaceDraft>({ name: "", path: "" });
+  const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [workspaceError, setWorkspaceError] = useState("");
 
   const readyTargets = useMemo(
     () => connection.kind === "ready" ? (connection.result.targets ?? []).filter((target) => target.state === "ready") : [],
     [connection],
+  );
+  const selectedTargetStatus = useMemo(
+    () => connection.kind === "ready" ? connection.result.targets?.find((target) => target.id === selectedTarget) : undefined,
+    [connection, selectedTarget],
   );
 
   const checkConnection = useCallback(async () => {
@@ -118,7 +134,7 @@ function App() {
       } else if (response.result?.daemon === "ready") {
         setConnection({ kind: "ready", result: response.result });
         const firstReady = response.result.targets?.find((target) => target.state === "ready");
-        setSelectedTarget((current) => current || firstReady?.id || "");
+        setSelectedTarget((current) => response.result?.targets?.some((target) => target.id === current && target.state === "ready") ? current : firstReady?.id || "");
       } else {
         setConnection({ kind: "unavailable", detail: "daemon 尚未就绪，请启动 agentferryd。" });
       }
@@ -179,8 +195,31 @@ function App() {
     }
   }, [templateSettings]);
 
+  const updateWorkspaces = useCallback(async (command: { type: "workspace_add"; name: string; path: string } | { type: "workspace_remove"; identifier: string }) => {
+    setWorkspaceBusy(true);
+    setWorkspaceError("");
+    try {
+      const response = (await browser.runtime.sendNativeMessage(NATIVE_HOST_NAME, {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: crypto.randomUUID(),
+        command,
+      })) as HostResponse;
+      if (response.error) throw new Error(response.error.message);
+      if (!response.result) throw new Error("本地服务没有返回更新后的启动目录");
+      setConnection({ kind: "ready", result: response.result });
+      const firstReady = response.result.targets?.find((target) => target.state === "ready");
+      setSelectedTarget((current) => response.result?.targets?.some((target) => target.id === current && target.state === "ready") ? current : firstReady?.id || "");
+      if (command.type === "workspace_add") setWorkspaceDraft({ name: "", path: "" });
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  }, []);
+
   const startHandoff = useCallback(async () => {
     if (!selectedTarget || !prompt.trim()) return;
+    const agentLabel = targetAgent(selectedTargetStatus).label;
     setRun({ kind: "capturing", label: "正在读取当前页面…" });
     try {
       const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
@@ -265,11 +304,11 @@ function App() {
         const text = message.text ?? "";
         setRun((current) => {
           const output = "output" in current ? current.output : "";
-          if (message.event === "completed") return { kind: "done", label: "Hermes 已完成", output: text || output };
-          if (message.event === "failed" || message.event === "cancelled") return { kind: "failed", label: text || "Hermes 任务未完成", output };
-          if (message.event === "output_delta") return { kind: "running", label: "Hermes 正在分析", output: output + text };
-          if (message.event === "tool_started") return { kind: "running", label: `Hermes 正在使用工具${text ? `：${text}` : ""}`, output };
-          return { kind: "running", label: message.event === "submitted" ? "已提交，等待 Hermes" : "Hermes 正在分析", output };
+          if (message.event === "completed") return { kind: "done", label: `${agentLabel} 已完成`, output: text || output };
+          if (message.event === "failed" || message.event === "cancelled") return { kind: "failed", label: text || `${agentLabel} 任务未完成`, output };
+          if (message.event === "output_delta") return { kind: "running", label: `${agentLabel} 正在分析`, output: output + text };
+          if (message.event === "tool_started") return { kind: "running", label: `${agentLabel} 正在使用工具${text ? `：${text}` : ""}`, output };
+          return { kind: "running", label: message.event === "submitted" ? `已提交，等待 ${agentLabel}` : `${agentLabel} 正在分析`, output };
         });
       });
       port.onDisconnect.addListener(() => {
@@ -294,13 +333,42 @@ function App() {
     } catch (error) {
       setRun({ kind: "failed", label: error instanceof Error ? error.message : String(error), output: "" });
     }
-  }, [prompt, selectedTarget]);
+  }, [prompt, selectedTarget, selectedTargetStatus]);
 
   return (
     <main>
       <header><div className="mark" aria-hidden="true">AF</div><div><p className="eyebrow">AGENT FERRY</p><h1>交给你的 Agent</h1></div></header>
       <section className={`status status-${connection.kind}`} aria-live="polite"><span className="status-dot" /><div><p className="status-title">{connection.kind === "checking" ? "正在检查本地连接" : connection.kind === "ready" ? "本地通路已就绪" : "暂时无法连接"}</p><p className="status-detail">{connection.kind === "checking" ? "Chrome → Native Host → agentferryd" : connection.kind === "ready" ? `Agent Ferry ${connection.result.core_version}` : connection.detail}</p></div></section>
-      {connection.kind === "ready" && <section className="targets" aria-label="可用目标"><div className="section-heading"><p>REMOTE HERMES</p><span>{connection.result.targets?.length ?? 0}</span></div>{(connection.result.targets?.length ?? 0) === 0 ? <div className="empty-target"><p>尚未配置远程目标</p><code>aferry connection add hermes</code></div> : connection.result.targets?.map((target) => <label className={`target ${target.state !== "ready" ? "target-disabled" : ""}`} key={target.id}><input type="radio" name="target" value={target.id} checked={selectedTarget === target.id} disabled={target.state !== "ready"} onChange={() => setSelectedTarget(target.id)} /><span className={`target-dot target-${target.state}`} /><div><p className="target-name">{target.name}</p><p className="target-detail">{targetStateLabel(target.state)}{target.state === "ready" && target.capabilities.includes("run.events_sse") ? " · 实时输出" : ""}</p></div></label>)}</section>}
+      {connection.kind === "ready" && <section className="targets" aria-label="发送到"><div className="section-heading"><p>发送到</p><span>{readyTargets.length} 个可用</span></div>{(connection.result.targets?.length ?? 0) === 0 ? <div className="empty-target"><p>尚未配置可用目标</p><code>请在下方添加本地 Agent 启动目录</code></div> : connection.result.targets?.map((target) => {
+        const selected = selectedTarget === target.id;
+        const agent = targetAgent(target);
+        const realtime = target.capabilities.includes("run.events_sse") || target.capabilities.includes("run.events");
+        return <label className={`target target-${agent.local ? "local" : "remote"} ${selected ? "target-selected" : ""} ${target.state !== "ready" ? "target-disabled" : ""}`} key={target.id}>
+          <input className="target-radio" type="radio" name="target" value={target.id} checked={selected} disabled={target.state !== "ready"} onChange={() => setSelectedTarget(target.id)} />
+          <span className="target-avatar" aria-hidden="true">{agent.avatar}</span>
+          <span className="target-copy"><span className="target-name">{target.name}</span><span className="target-meta"><span>{agent.local ? "本机" : "远程"}</span><span className={`target-state target-state-${target.state}`}>{targetStateLabel(target.state)}</span>{target.state === "ready" && realtime && <span>实时输出</span>}</span></span>
+          <span className="target-check" aria-hidden="true" />
+        </label>;
+      })}</section>}
+      {connection.kind === "ready" && <details className="workspace-settings">
+        <summary><span><strong>本地 Agent 启动目录</strong><small>OpenCode 与 Claude Code</small></span><span className="summary-action">配置</span></summary>
+        <div className="workspace-panel">
+          <p className="workspace-help">每个目录会生成对应的本地 Agent 目标。Hermes 不使用这里的配置。</p>
+          <div className="workspace-list">
+            {(connection.result.workspaces ?? []).map((workspace) => <div className="workspace-item" key={workspace.id}>
+              <span className={`workspace-route ${workspace.ready ? "" : "workspace-route-broken"}`} aria-hidden="true">OC · CC</span>
+              <span className="workspace-copy"><strong>{workspace.name}</strong><code title={workspace.path}>{workspace.path}</code></span>
+              <button className="workspace-remove" type="button" disabled={workspaceBusy} aria-label={`删除启动目录 ${workspace.name}`} onClick={() => void updateWorkspaces({ type: "workspace_remove", identifier: workspace.id })}>移除</button>
+            </div>)}
+          </div>
+          <div className="workspace-form">
+            <label>名称<input value={workspaceDraft.name} maxLength={128} placeholder="例如：agent-ferry" onChange={(event) => setWorkspaceDraft({ ...workspaceDraft, name: event.target.value })} /></label>
+            <label>绝对路径<input value={workspaceDraft.path} placeholder="/Users/name/projects/app" onChange={(event) => setWorkspaceDraft({ ...workspaceDraft, path: event.target.value })} /></label>
+            <button className="workspace-add" type="button" disabled={workspaceBusy || !workspaceDraft.name.trim() || !workspaceDraft.path.trim()} onClick={() => void updateWorkspaces({ type: "workspace_add", name: workspaceDraft.name, path: workspaceDraft.path })}>{workspaceBusy ? "正在保存…" : "添加启动目录"}</button>
+          </div>
+          {workspaceError && <p className="workspace-error" role="alert">{workspaceError}</p>}
+        </div>
+      </details>}
       {connection.kind === "ready" && <section className="prompt-section">
         <div className="template-row">
           <label>Prompt 模板<select value={templateSettings.selected_template_id ?? ""} onChange={(event) => void selectTemplate(event.target.value)}><option value="">默认 Prompt</option>{templateSettings.templates.map((template) => <option value={template.id} key={template.id}>{template.name}</option>)}</select></label>
@@ -319,9 +387,9 @@ function App() {
         <label className="prompt-label">最终 Prompt（将原样发送）<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={4} /></label>
       </section>}
       {connection.kind === "unavailable" && <button className="secondary" type="button" onClick={() => void checkConnection()}>重新检查</button>}
-      <button className="primary" type="button" disabled={connection.kind !== "ready" || readyTargets.length === 0 || !selectedTarget || !prompt.trim() || run.kind === "capturing" || run.kind === "running"} onClick={() => void startHandoff()}>{run.kind === "capturing" ? "正在提取页面…" : run.kind === "running" ? "Hermes 正在处理…" : "发送当前页面"}</button>
+      <button className="primary" type="button" disabled={connection.kind !== "ready" || readyTargets.length === 0 || !selectedTarget || !prompt.trim() || run.kind === "capturing" || run.kind === "running"} onClick={() => void startHandoff()}>{run.kind === "capturing" ? "正在提取页面…" : run.kind === "running" ? "Agent 正在处理…" : "发送当前页面"}</button>
       {run.kind !== "idle" && <section className={`run run-${run.kind}`} aria-live="polite"><p className="run-label">{run.label}</p>{"output" in run && run.output && <pre>{run.output}</pre>}</section>}
-      <p className="footnote">{run.kind === "capturing" ? "提取完成前请保持弹窗打开" : "关闭弹窗不会取消已提交的远端任务"}</p>
+      <p className="footnote">{run.kind === "capturing" ? "提取完成前请保持弹窗打开" : "关闭弹窗不会取消已提交的任务"}</p>
     </main>
   );
 }

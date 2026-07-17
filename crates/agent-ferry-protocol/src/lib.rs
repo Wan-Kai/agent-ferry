@@ -58,6 +58,13 @@ pub enum Command {
     ConnectionRemove {
         identifier: String,
     },
+    WorkspaceAdd {
+        name: String,
+        path: String,
+    },
+    WorkspaceRemove {
+        identifier: String,
+    },
     HermesRun {
         task_id: String,
         target_id: String,
@@ -109,6 +116,15 @@ impl std::fmt::Debug for Command {
                 .finish(),
             Self::ConnectionRemove { identifier } => formatter
                 .debug_struct("ConnectionRemove")
+                .field("identifier", identifier)
+                .finish(),
+            Self::WorkspaceAdd { name, path } => formatter
+                .debug_struct("WorkspaceAdd")
+                .field("name", name)
+                .field("path", path)
+                .finish(),
+            Self::WorkspaceRemove { identifier } => formatter
+                .debug_struct("WorkspaceRemove")
                 .field("identifier", identifier)
                 .finish(),
             Self::HermesRun {
@@ -175,6 +191,8 @@ impl Command {
             Self::Status => "status",
             Self::ConnectionAdd { .. } => "connection_add",
             Self::ConnectionRemove { .. } => "connection_remove",
+            Self::WorkspaceAdd { .. } => "workspace_add",
+            Self::WorkspaceRemove { .. } => "workspace_remove",
             Self::HermesRun { .. } => "hermes_run",
             Self::Handoff { .. } => "handoff",
             Self::HandoffBegin { .. } => "handoff_begin",
@@ -282,6 +300,16 @@ pub enum ServiceState {
 #[serde(rename_all = "snake_case")]
 pub enum HandoffTargetKind {
     RemoteHermes,
+    LocalOpenCode,
+    LocalClaudeCode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalWorkspaceStatus {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub ready: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,7 +339,9 @@ pub struct StatusResult {
     pub chrome_extension: ServiceState,
     pub capabilities: Vec<String>,
     #[serde(default)]
-    pub targets: Vec<HandoffTargetStatus>,
+    pub targets: Box<[HandoffTargetStatus]>,
+    #[serde(default)]
+    pub workspaces: Box<[LocalWorkspaceStatus]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -15,6 +15,9 @@ use tokio::sync::mpsc;
 use url::Url;
 use uuid::Uuid;
 
+#[cfg(debug_assertions)]
+use std::collections::BTreeMap;
+
 pub const KEYCHAIN_SERVICE: &str = "com.agentferry.hermes";
 const KEYCHAIN_REFERENCE_PREFIX: &str = "keychain:com.agentferry.hermes:";
 const KEYCHAIN_ITEM_NOT_FOUND: i32 = -25_300;
@@ -259,6 +262,79 @@ impl CredentialStore for KeychainCredentialStore {
             Err(error) if error.code() == KEYCHAIN_ITEM_NOT_FOUND => Ok(()),
             Err(error) => Err(HermesError::CredentialStore(error.to_string())),
         }
+    }
+}
+
+/// 仅供 Debug 构建使用的本地凭据替身。
+///
+/// 明文文件刻意放在应用私有目录而非仓库中，并强制使用 `0600` 权限。该类型在
+/// Release 构建中完全不存在，避免测试便利路径意外进入发行包。
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone)]
+pub struct DevelopmentCredentialStore {
+    path: PathBuf,
+}
+
+#[cfg(debug_assertions)]
+impl DevelopmentCredentialStore {
+    #[must_use]
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn load(&self) -> Result<BTreeMap<String, Vec<u8>>, HermesError> {
+        match fs::read(&self.path) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn save(&self, credentials: &BTreeMap<String, Vec<u8>>) -> Result<(), HermesError> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| HermesError::CredentialStore("开发凭据文件缺少父目录".to_owned()))?;
+        fs::create_dir_all(parent)?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        let temporary = self
+            .path
+            .with_extension(format!("json.tmp-{}", Uuid::new_v4()));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true).mode(0o600);
+        let mut file = options.open(&temporary)?;
+        file.write_all(&serde_json::to_vec(credentials)?)?;
+        file.sync_all()?;
+        fs::rename(&temporary, &self.path)?;
+        fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+}
+
+#[cfg(debug_assertions)]
+impl CredentialStore for DevelopmentCredentialStore {
+    fn set(&self, reference: &str, secret: &[u8]) -> Result<(), HermesError> {
+        KeychainCredentialStore::account(reference)?;
+        if secret.is_empty() {
+            return Err(HermesError::EmptyCredential);
+        }
+        let mut credentials = self.load()?;
+        credentials.insert(reference.to_owned(), secret.to_vec());
+        self.save(&credentials)
+    }
+
+    fn get(&self, reference: &str) -> Result<Option<Vec<u8>>, HermesError> {
+        KeychainCredentialStore::account(reference)?;
+        Ok(self.load()?.get(reference).cloned())
+    }
+
+    fn delete(&self, reference: &str) -> Result<(), HermesError> {
+        KeychainCredentialStore::account(reference)?;
+        let mut credentials = self.load()?;
+        if credentials.remove(reference).is_some() {
+            self.save(&credentials)?;
+        }
+        Ok(())
     }
 }
 
@@ -937,6 +1013,37 @@ pub enum HermesError {
 mod tests {
     use super::*;
 
+    #[cfg(debug_assertions)]
+    #[test]
+    fn development_credential_store_is_private_and_round_trips() {
+        let root = std::env::temp_dir().join(format!("aferry-dev-credentials-{}", Uuid::new_v4()));
+        let path = root.join("credentials.json");
+        let store = DevelopmentCredentialStore::new(path.clone());
+        let reference = format!("{KEYCHAIN_REFERENCE_PREFIX}test");
+
+        store.set(&reference, b"secret").expect("保存开发凭据");
+        assert_eq!(
+            store.get(&reference).expect("读取开发凭据"),
+            Some(b"secret".to_vec())
+        );
+        assert_eq!(
+            fs::metadata(&path).expect("读取权限").permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&root)
+                .expect("读取目录权限")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+
+        store.delete(&reference).expect("删除开发凭据");
+        assert_eq!(store.get(&reference).expect("确认删除"), None);
+        fs::remove_dir_all(root).expect("清理测试目录");
+    }
+
     #[test]
     fn connection_rejects_embedded_credentials_and_query() {
         assert!(matches!(
@@ -1024,6 +1131,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "发布验收时手动运行；普通本地测试不得触发系统钥匙串授权"]
     fn keychain_round_trip_uses_unique_temporary_item() {
         let store = KeychainCredentialStore;
         let connection = HermesConnection::direct("keychain-smoke", "http://127.0.0.1:8642", None)

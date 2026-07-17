@@ -28,6 +28,8 @@ pub struct AgentFerryPaths {
     pub run_dir: PathBuf,
     pub socket: PathBuf,
     pub connector_token: PathBuf,
+    #[cfg(debug_assertions)]
+    pub development_credentials: PathBuf,
     pub native_host_manifest: PathBuf,
 }
 
@@ -69,6 +71,8 @@ impl AgentFerryPaths {
         Self {
             socket: run_dir.join("agentferryd.sock"),
             connector_token: run_dir.join("connector.token"),
+            #[cfg(debug_assertions)]
+            development_credentials: root.join("dev").join("hermes-credentials.json"),
             hermes_connections: config_dir.join("hermes-connections.json"),
             claude_binding: config_dir.join("claude-code.json"),
             opencode_binding: config_dir.join("opencode.json"),

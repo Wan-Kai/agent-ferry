@@ -8,8 +8,10 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+agent-ferry-claude = { path = "../agent-ferry-claude" }
 agent-ferry-core = { path = "../agent-ferry-core" }
 agent-ferry-hermes = { path = "../agent-ferry-hermes" }
+agent-ferry-opencode = { path = "../agent-ferry-opencode" }
 agent-ferry-protocol = { path = "../agent-ferry-protocol" }
 serde.workspace = true
 serde_json.workspace = true
