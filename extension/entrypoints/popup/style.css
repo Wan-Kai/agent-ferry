@@ -177,6 +177,7 @@ a { color: inherit; text-decoration: none; }
 .scroll-content {
   min-height: 0;
   flex: 1;
+  overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;
@@ -669,9 +670,21 @@ a { color: inherit; text-decoration: none; }
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
 }
 
-.task-list { padding: 0 16px 16px; display: grid; gap: 8px; }
+.task-list {
+  width: 100%;
+  min-width: 0;
+  padding: 0 16px 16px;
+  display: grid;
+  /* 长英文标题的 min-content 可能撑开默认 Grid 列，必须允许列缩到 Popup 内容宽度。 */
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
 
 .task-card {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   padding: 11px 12px;
   display: block;
   border: 1px solid var(--border);
@@ -682,7 +695,8 @@ a { color: inherit; text-decoration: none; }
 
 .task-card:hover { border-color: var(--border-strong); background: var(--surface-subtle); }
 
-.task-card-top { display: flex; align-items: flex-start; gap: 9px; }
+.task-card-top { min-width: 0; display: flex; align-items: flex-start; gap: 9px; }
+.task-card-top > .icon { flex-shrink: 0; }
 
 .task-status-icon {
   width: 26px;
@@ -710,6 +724,8 @@ a { color: inherit; text-decoration: none; }
 }
 
 .task-meta {
+  min-width: 0;
+  overflow: hidden;
   margin-top: 3px;
   display: flex;
   align-items: center;
@@ -717,6 +733,15 @@ a { color: inherit; text-decoration: none; }
   color: var(--muted);
   font: 400 10px/1.3 var(--font-mono);
 }
+
+.task-meta > span:not(:nth-child(2)) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-meta > span:nth-child(2) { flex-shrink: 0; }
 
 .task-card-bottom {
   margin-top: 9px;
