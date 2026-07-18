@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use agent_ferry_core::AgentFerryPaths;
@@ -14,9 +16,6 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use url::Url;
 use uuid::Uuid;
-
-#[cfg(debug_assertions)]
-use std::collections::BTreeMap;
 
 pub const KEYCHAIN_SERVICE: &str = "com.agentferry.hermes";
 const KEYCHAIN_REFERENCE_PREFIX: &str = "keychain:com.agentferry.hermes:";
@@ -217,6 +216,58 @@ pub trait CredentialStore: Send + Sync {
     ///
     /// 系统凭据存储拒绝删除时返回错误。
     fn delete(&self, reference: &str) -> Result<(), HermesError>;
+}
+
+/// 在进程生命周期内复用已解锁的凭据，避免后台任务反复触发系统授权。
+#[derive(Debug)]
+pub struct CachedCredentialStore<S> {
+    inner: S,
+    cache: Mutex<BTreeMap<String, Vec<u8>>>,
+}
+
+impl<S> CachedCredentialStore<S> {
+    #[must_use]
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            cache: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn lock_cache(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, BTreeMap<String, Vec<u8>>>, HermesError> {
+        self.cache
+            .lock()
+            .map_err(|_| HermesError::CredentialStore("进程内凭据缓存已损坏".to_owned()))
+    }
+}
+
+impl<S: CredentialStore> CredentialStore for CachedCredentialStore<S> {
+    fn set(&self, reference: &str, secret: &[u8]) -> Result<(), HermesError> {
+        self.inner.set(reference, secret)?;
+        self.lock_cache()?
+            .insert(reference.to_owned(), secret.to_vec());
+        Ok(())
+    }
+
+    fn get(&self, reference: &str) -> Result<Option<Vec<u8>>, HermesError> {
+        let mut cache = self.lock_cache()?;
+        if let Some(secret) = cache.get(reference) {
+            return Ok(Some(secret.clone()));
+        }
+        let secret = self.inner.get(reference)?;
+        if let Some(secret) = &secret {
+            cache.insert(reference.to_owned(), secret.clone());
+        }
+        Ok(secret)
+    }
+
+    fn delete(&self, reference: &str) -> Result<(), HermesError> {
+        self.inner.delete(reference)?;
+        self.lock_cache()?.remove(reference);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1012,6 +1063,47 @@ pub enum HermesError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct CountingCredentialStore {
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl CredentialStore for CountingCredentialStore {
+        fn set(&self, _reference: &str, _secret: &[u8]) -> Result<(), HermesError> {
+            Ok(())
+        }
+
+        fn get(&self, _reference: &str) -> Result<Option<Vec<u8>>, HermesError> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(b"cached-secret".to_vec()))
+        }
+
+        fn delete(&self, _reference: &str) -> Result<(), HermesError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn cached_credential_store_reads_backing_store_once_per_process_lifetime() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let store = CachedCredentialStore::new(CountingCredentialStore {
+            reads: Arc::clone(&reads),
+        });
+        let reference = format!("{KEYCHAIN_REFERENCE_PREFIX}cache-test");
+
+        assert_eq!(
+            store.get(&reference).expect("首次读取"),
+            Some(b"cached-secret".to_vec())
+        );
+        assert_eq!(
+            store.get(&reference).expect("复用缓存"),
+            Some(b"cached-secret".to_vec())
+        );
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+    }
 
     #[cfg(debug_assertions)]
     #[test]

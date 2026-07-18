@@ -32,7 +32,8 @@ fn spawn_fake_hermes() -> (String, std::thread::JoinHandle<String>) {
             }
         }"#;
         let mut requests = String::new();
-        for _ in 0..2 {
+        // 添加连接会显式验证一次；后续 list/doctor 只读取 daemon 缓存，不能再次访问凭据或远端。
+        for _ in 0..1 {
             let (mut stream, _) = listener.accept().expect("接受诊断请求");
             let mut request = Vec::new();
             let mut buffer = [0_u8; 1024];

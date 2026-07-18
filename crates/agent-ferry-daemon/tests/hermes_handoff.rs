@@ -9,7 +9,8 @@ use agent_ferry_hermes::{
     remove_connection,
 };
 use agent_ferry_protocol::{
-    ConnectorKind, HandoffEvent, HandoffEventKind, IpcEnvelope, read_json_frame, write_json_frame,
+    ConnectorKind, HandoffEvent, HandoffEventKind, HostResponse, IpcEnvelope, ResponseOutcome,
+    read_json_frame, write_json_frame,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -247,4 +248,69 @@ async fn chrome_handoff_streams_ordered_events_and_submits_complete_page() {
             .is_none(),
         "测试结束后必须删除临时开发凭据"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_uses_configured_targets_without_contacting_hermes() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("启动被动 Hermes 监听器");
+    let base_url = format!("http://{}", listener.local_addr().expect("读取监听地址"));
+    let root = temporary_root();
+    let paths = AgentFerryPaths::from_root(root);
+    let connection = HermesConnection::direct("passive-status", &base_url, None)
+        .expect("创建临时 Hermes Connection");
+    let connection_id = connection.id.clone();
+    let store = DevelopmentCredentialStore::new(paths.development_credentials.clone());
+    add_connection(&paths, &store, connection, b"passive-status-secret")
+        .expect("保存临时 Connection");
+    let cleanup = ConnectionCleanup {
+        paths: paths.clone(),
+        connection_id,
+    };
+
+    let daemon = Daemon::bind(paths.clone()).expect("绑定 daemon");
+    let token = load_connector_token(&paths).expect("读取 Connector token");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let daemon_task = tokio::spawn(daemon.serve_until(async {
+        let _ = shutdown_rx.await;
+    }));
+    let socket = paths.socket.clone();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        tokio::task::spawn_blocking(move || {
+            let envelope = IpcEnvelope {
+                auth_token: token,
+                connector: ConnectorKind::ChromeNativeHost,
+                request: json!({
+                    "protocol_version": 1,
+                    "request_id": "passive-status",
+                    "command": { "type": "status" }
+                }),
+            };
+            let mut stream = UnixStream::connect(socket).expect("连接 daemon socket");
+            write_json_frame(&mut stream, &envelope).expect("发送 Status");
+            read_json_frame::<_, HostResponse>(&mut stream).expect("读取 Status")
+        }),
+    )
+    .await
+    .expect("Status 不应等待远程 Hermes")
+    .expect("等待 Status 线程");
+    assert!(
+        matches!(response.outcome, ResponseOutcome::Success { .. }),
+        "Status 应返回缓存配置"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept())
+            .await
+            .is_err(),
+        "Status 不应连接远程 Hermes"
+    );
+
+    shutdown_tx.send(()).expect("停止 daemon");
+    daemon_task
+        .await
+        .expect("等待 daemon task")
+        .expect("daemon 正常退出");
+    drop(cleanup);
 }

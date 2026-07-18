@@ -17,8 +17,8 @@ use agent_ferry_hermes::DevelopmentCredentialStore;
 #[cfg(not(debug_assertions))]
 use agent_ferry_hermes::KeychainCredentialStore;
 use agent_ferry_hermes::{
-    CredentialStore, DiagnosisState, HermesClient, HermesConnection, add_connection,
-    load_connections, remove_connection,
+    CachedCredentialStore, CredentialStore, DiagnosisState, HermesClient, HermesConnection,
+    add_connection, load_connections, remove_connection,
 };
 use agent_ferry_opencode::{OpenCodeDocument, OpenCodeTaskEvent};
 use agent_ferry_protocol::{
@@ -51,6 +51,7 @@ pub struct Daemon {
     handoff_assemblies: Arc<Mutex<HashMap<String, HandoffAssembly>>>,
     target_cache: Arc<Mutex<Vec<HandoffTargetStatus>>>,
     history: Arc<Mutex<HistoryRepository>>,
+    credentials: Arc<RuntimeCredentialStore>,
 }
 
 const MAX_ACTIVE_HANDOFF_ASSEMBLIES: usize = 8;
@@ -59,11 +60,12 @@ const OPENCODE_TARGET_PREFIX: &str = "opencode-";
 const CLAUDE_TARGET_PREFIX: &str = "claude-";
 const CODEX_CLI_TARGET_PREFIX: &str = "codex-cli-";
 const CODEX_APP_TARGET_PREFIX: &str = "codex-app-";
+#[derive(Debug)]
 enum RuntimeCredentialStore {
     #[cfg(not(debug_assertions))]
-    Keychain(KeychainCredentialStore),
+    Keychain(CachedCredentialStore<KeychainCredentialStore>),
     #[cfg(debug_assertions)]
-    Development(DevelopmentCredentialStore),
+    Development(CachedCredentialStore<DevelopmentCredentialStore>),
 }
 
 impl CredentialStore for RuntimeCredentialStore {
@@ -97,13 +99,13 @@ impl CredentialStore for RuntimeCredentialStore {
 
 fn runtime_credential_store(paths: &AgentFerryPaths) -> RuntimeCredentialStore {
     #[cfg(debug_assertions)]
-    return RuntimeCredentialStore::Development(DevelopmentCredentialStore::new(
-        paths.development_credentials.clone(),
+    return RuntimeCredentialStore::Development(CachedCredentialStore::new(
+        DevelopmentCredentialStore::new(paths.development_credentials.clone()),
     ));
     #[cfg(not(debug_assertions))]
     let _ = paths;
     #[cfg(not(debug_assertions))]
-    RuntimeCredentialStore::Keychain(KeychainCredentialStore)
+    RuntimeCredentialStore::Keychain(CachedCredentialStore::new(KeychainCredentialStore))
 }
 
 struct HandoffAssembly {
@@ -160,6 +162,7 @@ impl Daemon {
         std::fs::set_permissions(&paths.socket, std::fs::Permissions::from_mode(0o600))?;
         let hermes_client = HermesClient::new(Duration::from_secs(5)).map_err(io::Error::other)?;
         let history = HistoryRepository::open(&paths)?;
+        let credentials = Arc::new(runtime_credential_store(&paths));
         Ok(Self {
             paths,
             listener,
@@ -169,6 +172,7 @@ impl Daemon {
             handoff_assemblies: Arc::new(Mutex::new(HashMap::new())),
             target_cache: Arc::new(Mutex::new(Vec::new())),
             history: Arc::new(Mutex::new(history)),
+            credentials,
         })
     }
 
@@ -187,15 +191,6 @@ impl Daemon {
         F: Future<Output = ()>,
     {
         info!(socket = %self.paths.socket.display(), "agentferryd 已启动");
-        let refresh_paths = self.paths.clone();
-        let refresh_client = Arc::clone(&self.hermes_client);
-        let refresh_cache = Arc::clone(&self.target_cache);
-        let refresh_task = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                refresh_target_cache(&refresh_paths, &refresh_client, &refresh_cache).await;
-            }
-        });
         tokio::pin!(shutdown);
         loop {
             tokio::select! {
@@ -212,6 +207,7 @@ impl Daemon {
                     let handoff_assemblies = Arc::clone(&self.handoff_assemblies);
                     let target_cache = Arc::clone(&self.target_cache);
                     let history = Arc::clone(&self.history);
+                    let credentials = Arc::clone(&self.credentials);
                     tokio::spawn(async move {
                         if let Err(error) = handle_connection(
                             stream,
@@ -222,6 +218,7 @@ impl Daemon {
                             &handoff_assemblies,
                             &target_cache,
                             &history,
+                            &credentials,
                         ).await {
                             warn!(error = %error, "本地 Connector 请求失败");
                         }
@@ -229,7 +226,6 @@ impl Daemon {
                 }
             }
         }
-        refresh_task.abort();
         if self.paths.socket.exists() {
             std::fs::remove_file(&self.paths.socket)?;
         }
@@ -247,6 +243,7 @@ async fn handle_connection(
     handoff_assemblies: &Mutex<HashMap<String, HandoffAssembly>>,
     target_cache: &Mutex<Vec<HandoffTargetStatus>>,
     history: &Mutex<HistoryRepository>,
+    credentials: &RuntimeCredentialStore,
 ) -> io::Result<()> {
     let payload = match read_async_frame(&mut stream).await {
         Ok(payload) => payload,
@@ -321,6 +318,7 @@ async fn handle_connection(
                 &envelope.connector,
                 paths,
                 hermes_client,
+                credentials,
             )
             .await
         }
@@ -341,6 +339,7 @@ async fn handle_connection(
                 paths,
                 hermes_client,
                 history,
+                credentials,
             )
             .await
         }
@@ -405,6 +404,7 @@ async fn handle_connection(
                         paths,
                         hermes_client,
                         history,
+                        credentials,
                     )
                     .await
                 }
@@ -460,6 +460,7 @@ async fn handle_connection(
                 paths,
                 hermes_client,
                 target_cache,
+                credentials,
             )
             .await;
             write_async_json(&mut stream, &response).await
@@ -475,6 +476,7 @@ async fn dispatch_request(
     paths: &AgentFerryPaths,
     hermes_client: &HermesClient,
     target_cache: &Mutex<Vec<HandoffTargetStatus>>,
+    credentials: &RuntimeCredentialStore,
 ) -> HostResponse {
     match request.command {
         Command::Status => {
@@ -512,8 +514,7 @@ async fn dispatch_request(
                 }
             }
             .and_then(|connection| {
-                let store = runtime_credential_store(paths);
-                add_connection(paths, &store, connection, token.as_bytes())
+                add_connection(paths, credentials, connection, token.as_bytes())
             });
             if let Err(error) = operation {
                 return HostResponse::failure(
@@ -523,7 +524,7 @@ async fn dispatch_request(
                     false,
                 );
             }
-            refresh_target_cache(paths, hermes_client, target_cache).await;
+            refresh_target_cache(paths, hermes_client, target_cache, credentials).await;
             status_response(
                 request.request_id,
                 connector,
@@ -543,8 +544,7 @@ async fn dispatch_request(
                     false,
                 );
             }
-            let store = runtime_credential_store(paths);
-            if let Err(error) = remove_connection(paths, &store, &identifier) {
+            if let Err(error) = remove_connection(paths, credentials, &identifier) {
                 return HostResponse::failure(
                     request.request_id,
                     ErrorCode::InvalidMessage,
@@ -552,7 +552,7 @@ async fn dispatch_request(
                     false,
                 );
             }
-            refresh_target_cache(paths, hermes_client, target_cache).await;
+            refresh_target_cache(paths, hermes_client, target_cache, credentials).await;
             status_response(
                 request.request_id,
                 connector,
@@ -1018,6 +1018,7 @@ async fn stream_handoff(
     paths: &AgentFerryPaths,
     hermes_client: &HermesClient,
     history: &Mutex<HistoryRepository>,
+    credentials: &RuntimeCredentialStore,
 ) -> io::Result<()> {
     if *connector != ConnectorKind::ChromeNativeHost {
         return write_async_json(
@@ -1150,6 +1151,7 @@ async fn stream_handoff(
         paths,
         hermes_client,
         Some(history),
+        credentials,
     )
     .await;
     let _ = history
@@ -1603,6 +1605,7 @@ async fn stream_cli_hermes_run(
     connector: &ConnectorKind,
     paths: &AgentFerryPaths,
     hermes_client: &HermesClient,
+    credentials: &RuntimeCredentialStore,
 ) -> io::Result<()> {
     if *connector != ConnectorKind::Cli {
         return write_async_json(
@@ -1649,6 +1652,7 @@ async fn stream_cli_hermes_run(
         paths,
         hermes_client,
         None,
+        credentials,
     )
     .await
 }
@@ -1663,6 +1667,7 @@ async fn stream_hermes_updates(
     paths: &AgentFerryPaths,
     hermes_client: &HermesClient,
     history: Option<&Mutex<HistoryRepository>>,
+    credentials: &RuntimeCredentialStore,
 ) -> io::Result<()> {
     let connections = match load_connections(&paths.hermes_connections) {
         Ok(connections) => connections,
@@ -1690,7 +1695,7 @@ async fn stream_hermes_updates(
         )
         .await;
     };
-    let token = match runtime_credential_store(paths).get(&connection.credential_ref) {
+    let token = match credentials.get(&connection.credential_ref) {
         Ok(Some(token)) => token,
         Ok(None) => {
             return write_async_json(
@@ -1935,12 +1940,12 @@ async fn status_response(
     connector: &ConnectorKind,
     chrome_seen: &AtomicBool,
     paths: &AgentFerryPaths,
-    hermes_client: &HermesClient,
+    _hermes_client: &HermesClient,
     target_cache: &Mutex<Vec<HandoffTargetStatus>>,
 ) -> HostResponse {
     if target_cache.lock().await.is_empty() {
-        // 首次 Status 完成一次真实诊断；之后弹窗只读缓存，避免每次打开都重复建立 SSH Tunnel。
-        refresh_target_cache(paths, hermes_client, target_cache).await;
+        // 状态查询属于无副作用读取，不能触发钥匙串授权或 SSH 建连；真实任务提交时再完成在线诊断。
+        refresh_local_target_cache(paths, target_cache).await;
     }
     let targets = target_cache.lock().await.clone();
     let workspaces = agent_ferry_core::workspace::load(paths)
@@ -1996,24 +2001,19 @@ async fn refresh_target_cache(
     paths: &AgentFerryPaths,
     hermes_client: &HermesClient,
     target_cache: &Mutex<Vec<HandoffTargetStatus>>,
+    credentials: &RuntimeCredentialStore,
 ) {
-    let hermes_paths = paths.clone();
-    let hermes_client = hermes_client.clone();
-    let mut hermes =
-        tokio::spawn(async move { discover_hermes_targets(&hermes_paths, &hermes_client).await });
-    let hermes_result = tokio::time::timeout(Duration::from_secs(8), &mut hermes).await;
-    let remote_targets = match hermes_result {
-        Ok(Ok(targets)) => targets,
-        Ok(Err(error)) => {
-            warn!(error = %error, "Hermes 后台目标诊断异常，使用已配置目标");
-            configured_hermes_targets(paths)
-        }
-        Err(_) => {
-            hermes.abort();
-            // 弹窗选择不应被 SSH 建连拖住；真正提交任务时仍会重新验证服务端能力与凭据。
-            warn!("Hermes 后台目标诊断超过 8 秒，使用已配置目标");
-            configured_hermes_targets(paths)
-        }
+    let hermes_result = tokio::time::timeout(
+        Duration::from_secs(8),
+        discover_hermes_targets(paths, hermes_client, credentials),
+    )
+    .await;
+    let remote_targets = if let Ok(targets) = hermes_result {
+        targets
+    } else {
+        // 显式配置检查也不能被 SSH 建连无限拖住；真正提交任务时仍会重新验证服务端能力。
+        warn!("Hermes 目标诊断超过 8 秒，使用已配置目标");
+        configured_hermes_targets(paths)
     };
     {
         let mut targets = target_cache.lock().await;
@@ -2233,6 +2233,7 @@ fn discover_codex_targets(paths: &AgentFerryPaths) -> Vec<HandoffTargetStatus> {
 async fn discover_hermes_targets(
     paths: &AgentFerryPaths,
     client: &HermesClient,
+    store: &RuntimeCredentialStore,
 ) -> Vec<HandoffTargetStatus> {
     let connections = match load_connections(&paths.hermes_connections) {
         Ok(connections) => connections,
@@ -2241,10 +2242,9 @@ async fn discover_hermes_targets(
             return Vec::new();
         }
     };
-    let store = runtime_credential_store(paths);
     let mut targets = Vec::with_capacity(connections.connections.len());
     for connection in connections.connections {
-        let diagnosis = match client.diagnose_with_store(&connection, &store).await {
+        let diagnosis = match client.diagnose_with_store(&connection, store).await {
             Ok(diagnosis) => diagnosis,
             Err(error) => {
                 warn!(connection_id = connection.id, error = %error, "Hermes 诊断失败");
