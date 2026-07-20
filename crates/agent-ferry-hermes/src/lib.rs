@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 pub const KEYCHAIN_SERVICE: &str = "com.agentferry.hermes";
 const KEYCHAIN_REFERENCE_PREFIX: &str = "keychain:com.agentferry.hermes:";
+#[cfg(target_os = "macos")]
 const KEYCHAIN_ITEM_NOT_FOUND: i32 = -25_300;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,6 +312,7 @@ impl KeychainCredentialStore {
 }
 
 impl CredentialStore for KeychainCredentialStore {
+    #[cfg(target_os = "macos")]
     fn set(&self, reference: &str, secret: &[u8]) -> Result<(), HermesError> {
         if secret.is_empty() {
             return Err(HermesError::EmptyCredential);
@@ -320,6 +322,16 @@ impl CredentialStore for KeychainCredentialStore {
             .map_err(|error| HermesError::CredentialStore(error.to_string()))
     }
 
+    #[cfg(not(target_os = "macos"))]
+    fn set(&self, reference: &str, secret: &[u8]) -> Result<(), HermesError> {
+        Self::account(reference)?;
+        if secret.is_empty() {
+            return Err(HermesError::EmptyCredential);
+        }
+        Err(HermesError::KeychainUnsupported)
+    }
+
+    #[cfg(target_os = "macos")]
     fn get(&self, reference: &str) -> Result<Option<Vec<u8>>, HermesError> {
         let account = Self::account(reference)?;
         let options = security_framework::passwords::PasswordOptions::new_generic_password(
@@ -335,6 +347,13 @@ impl CredentialStore for KeychainCredentialStore {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
+    fn get(&self, reference: &str) -> Result<Option<Vec<u8>>, HermesError> {
+        Self::account(reference)?;
+        Err(HermesError::KeychainUnsupported)
+    }
+
+    #[cfg(target_os = "macos")]
     fn delete(&self, reference: &str) -> Result<(), HermesError> {
         let account = Self::account(reference)?;
         match security_framework::passwords::delete_generic_password(KEYCHAIN_SERVICE, account) {
@@ -342,6 +361,12 @@ impl CredentialStore for KeychainCredentialStore {
             Err(error) if error.code() == KEYCHAIN_ITEM_NOT_FOUND => Ok(()),
             Err(error) => Err(HermesError::CredentialStore(error.to_string())),
         }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn delete(&self, reference: &str) -> Result<(), HermesError> {
+        Self::account(reference)?;
+        Err(HermesError::KeychainUnsupported)
     }
 }
 
@@ -1075,6 +1100,8 @@ pub enum HermesError {
     ConnectionNotFound(String),
     #[error("macOS Keychain 操作失败: {0}")]
     CredentialStore(String),
+    #[error("macOS Keychain 仅支持在 macOS 客户端上使用")]
+    KeychainUnsupported,
     #[error("Hermes HTTP client 初始化失败: {0}")]
     HttpClient(reqwest::Error),
     #[error("Hermes Run 网络请求失败: {0}")]
@@ -1288,6 +1315,7 @@ mod tests {
         assert_eq!(completed.text.as_deref(), Some("完成"));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "发布验收时手动运行；普通本地测试不得触发系统钥匙串授权"]
     fn keychain_round_trip_uses_unique_temporary_item() {
