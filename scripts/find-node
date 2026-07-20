@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if command -v node >/dev/null 2>&1; then
+  command -v node
+  exit 0
+fi
+
+# Codex、GUI Shell 或未加载 nvm 的终端可能没有继承 Node PATH。这里只解析已安装的
+# Node 22，不执行下载或修改用户环境，保证本地验证与 CI 的主版本一致。
+nvm_root="${NVM_DIR:-${HOME}/.nvm}"
+node_candidate=""
+for candidate in "${nvm_root}"/versions/node/v22.*/bin/node; do
+  if [[ -x "${candidate}" ]]; then
+    node_candidate="${candidate}"
+  fi
+done
+
+if [[ -n "${node_candidate}" ]]; then
+  printf '%s\n' "${node_candidate}"
+  exit 0
+fi
+
+printf '%s\n' '未找到 Node.js 22。请先安装 Node 22，或加载现有 nvm 环境。' >&2
+exit 1

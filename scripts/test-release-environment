@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-ferry-release-environment.XXXXXX")"
+trap 'rm -rf "${temporary_root}"' EXIT
+
+secret_p12="P12_SECRET_MUST_NOT_APPEAR"
+secret_p8="P8_SECRET_MUST_NOT_APPEAR"
+success_log="${temporary_root}/success.log"
+APPLE_SIGNING_IDENTITY="Developer ID Application: Agent Ferry Test (ABCDEFGHIJ)" \
+APPLE_TEAM_ID="ABCDEFGHIJ" \
+APPLE_NOTARY_KEY_ID="KLMNOPQRST" \
+APPLE_NOTARY_ISSUER_ID="12345678-1234-1234-1234-1234567890ab" \
+APPLE_DEVELOPER_ID_P12_BASE64="$(printf '%s' "${secret_p12}" | openssl base64 -A)" \
+APPLE_DEVELOPER_ID_P12_PASSWORD="PASSWORD_MUST_NOT_APPEAR" \
+APPLE_NOTARY_KEY_P8_BASE64="$(printf '%s' "${secret_p8}" | openssl base64 -A)" \
+  "${script_dir}/check-release-environment" >"${success_log}" 2>&1
+
+for secret in "${secret_p12}" "${secret_p8}" "PASSWORD_MUST_NOT_APPEAR"; do
+  if grep -q "${secret}" "${success_log}"; then
+    printf '%s\n' 'Release 环境检查泄露了测试 Secret。' >&2
+    exit 1
+  fi
+done
+
+missing_log="${temporary_root}/missing.log"
+if APPLE_SIGNING_IDENTITY="Developer ID Application: Agent Ferry Test (ABCDEFGHIJ)" \
+  APPLE_TEAM_ID="ABCDEFGHIJ" \
+  "${script_dir}/check-release-environment" >"${missing_log}" 2>&1; then
+  printf '%s\n' '预期缺少 Release 配置时失败，但检查返回成功。' >&2
+  exit 1
+fi
+grep -q 'APPLE_NOTARY_KEY_ID' "${missing_log}"
+
+printf '%s\n' 'Apple Release 配置失败前置检查通过'

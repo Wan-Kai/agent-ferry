@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Ferry — Folded Handoff</title>
+  <desc id="desc">页面内容从折页边缘进入 Agent 通道。</desc>
+  <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="8">
+    <path d="M25 79V22a6 6 0 0 1 6-6h25l15 15v8"/>
+    <path d="M56 17v15h14"/>
+    <path d="M25 79h27"/>
+    <path d="M39 51h39"/>
+    <path d="m68 40 11 11-11 11"/>
+  </g>
+</svg>

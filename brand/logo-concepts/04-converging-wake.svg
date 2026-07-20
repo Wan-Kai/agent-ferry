@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Ferry — Converging Wake</title>
+  <desc id="desc">多路页面信息汇聚成一次明确交接。</desc>
+  <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="8">
+    <path d="M17 27h16c12 0 16 7 22 16"/>
+    <path d="M17 50h39"/>
+    <path d="M17 73h16c12 0 16-7 22-16"/>
+  </g>
+  <path d="M54 35h7c11 0 20 6 26 15-6 9-15 15-26 15h-7c5-9 5-21 0-30Z" fill="currentColor"/>
+</svg>

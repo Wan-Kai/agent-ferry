@@ -1,3 +1,10 @@
+//! [INPUT] daemon 已归一化的任务创建信息和 `HandoffEvent`。
+//! [OUTPUT] 当前用户私有、原子写入、可查询和可删除的有界 JSON 任务历史。
+//! [POS] 本模块是 daemon 内部 Repository，不承担 Agent Session 恢复或远程记忆职责。
+//! [INVARIANTS] 不保存捕获正文与凭据；输出、事件和记录数均有上限；运行中记录不能删除；
+//! daemon 重启只把遗留任务标记为 interrupted，不能伪造继续执行。
+//! [PROTOCOL] 字段与隐私边界由 ADR 0030 定义；对外 wire 类型位于 agent-ferry-protocol。
+
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};

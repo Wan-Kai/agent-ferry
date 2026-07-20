@@ -1,3 +1,11 @@
+//! [INPUT] Extension、Native Host、CLI 与 daemon 之间的结构化命令、响应和事件。
+//! [OUTPUT] 具有稳定 wire name、版本和长度上限的 JSON/Native Messaging 契约。
+//! [POS] 本 crate 位于最底层，不知道具体 Agent、运行时组合根或 UI 实现。
+//! [INVARIANTS] 在分配正文缓冲区前校验大小；敏感正文和 Token 的 Debug 输出必须脱敏；
+//! 新字段保持向后兼容默认值，破坏性变更必须提升协议版本并补兼容测试。
+//! [PROTOCOL] 依赖方向见 docs/architecture/dependency-rules.md；当前消息流见
+//! docs/architecture/overview.md。
+
 use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};

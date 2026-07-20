@@ -17,6 +17,71 @@ pub mod workspace;
 
 pub const HOME_ENV: &str = "AGENT_FERRY_HOME";
 
+/// 返回普通用户数据的默认目录。
+///
+/// CLI 本体使用 `~/.local` 安装，但配置、历史和运行状态需要跨版本保留，因此使用独立且稳定的
+/// `~/.agent-ferry`。该函数显式接收 home，避免测试通过修改进程环境变量造成并发污染。
+#[must_use]
+pub fn default_data_root(home: &Path) -> PathBuf {
+    home.join(".agent-ferry")
+}
+
+/// 返回早期开发版本使用的数据目录。
+#[must_use]
+pub fn legacy_data_root(home: &Path) -> PathBuf {
+    home.join("Library")
+        .join("Application Support")
+        .join("Agent Ferry")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DataMigrationOutcome {
+    NotNeeded,
+    Migrated { from: PathBuf, to: PathBuf },
+}
+
+/// 将早期开发版本的数据根目录原子迁移到 CLI 风格目录。
+///
+/// 迁移只在“旧目录存在、新目录不存在”时发生。双目录合并无法判断同名配置哪一份更新，静默覆盖会
+/// 丢失用户连接和历史，因此将冲突交给上层明确展示。两个目录都位于同一用户 home 下，使用 rename
+/// 可以避免复制中断留下半份数据；安装器必须在停止旧 daemon 后调用本函数。
+///
+/// # Errors
+///
+/// 双目录同时存在或文件系统操作失败时返回错误。
+pub fn migrate_legacy_data(home: &Path) -> Result<DataMigrationOutcome, CoreError> {
+    let legacy = legacy_data_root(home);
+    let current = default_data_root(home);
+    let legacy_exists = safe_data_root_exists(&legacy)?;
+    let current_exists = safe_data_root_exists(&current)?;
+
+    match (legacy_exists, current_exists) {
+        (false, _) => Ok(DataMigrationOutcome::NotNeeded),
+        (true, true) => Err(CoreError::DataRootConflict { legacy, current }),
+        (true, false) => {
+            fs::rename(&legacy, &current)?;
+            fs::set_permissions(&current, fs::Permissions::from_mode(0o700))?;
+            Ok(DataMigrationOutcome::Migrated {
+                from: legacy,
+                to: current,
+            })
+        }
+    }
+}
+
+fn safe_data_root_exists(path: &Path) -> Result<bool, CoreError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err(CoreError::UnsafeDataRoot {
+                path: path.to_path_buf(),
+            })
+        }
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentFerryPaths {
     pub root: PathBuf,
@@ -46,10 +111,7 @@ impl AgentFerryPaths {
             PathBuf::from(root)
         } else {
             let home = env::var_os("HOME").ok_or(CoreError::HomeDirectoryUnavailable)?;
-            PathBuf::from(home)
-                .join("Library")
-                .join("Application Support")
-                .join("Agent Ferry")
+            default_data_root(Path::new(&home))
         };
         let mut paths = Self::from_root(root);
         let home = env::var_os("HOME").ok_or(CoreError::HomeDirectoryUnavailable)?;
@@ -235,6 +297,10 @@ pub enum CoreError {
     HomeDirectoryUnavailable,
     #[error("Connector token 为空")]
     EmptyConnectorToken,
+    #[error("新旧数据目录同时存在，拒绝自动合并: {legacy} 与 {current}")]
+    DataRootConflict { legacy: PathBuf, current: PathBuf },
+    #[error("数据目录不是普通目录，拒绝迁移: {path}")]
+    UnsafeDataRoot { path: PathBuf },
     #[error("文件或 Socket 操作失败: {0}")]
     Io(#[from] io::Error),
     #[error("协议 framing 失败: {0}")]
@@ -246,9 +312,108 @@ pub enum CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
 
     fn temporary_root() -> PathBuf {
         env::temp_dir().join(format!("agent-ferry-core-test-{}", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn default_data_root_uses_cli_style_location() {
+        let home = temporary_root();
+        assert_eq!(default_data_root(&home), home.join(".agent-ferry"));
+        assert_eq!(
+            legacy_data_root(&home),
+            home.join("Library")
+                .join("Application Support")
+                .join("Agent Ferry")
+        );
+    }
+
+    #[test]
+    fn legacy_data_is_moved_atomically_when_new_root_is_absent() {
+        let home = temporary_root();
+        let legacy = legacy_data_root(&home);
+        fs::create_dir_all(legacy.join("config")).expect("创建旧配置目录");
+        fs::write(legacy.join("config/workspaces.json"), b"legacy").expect("写入旧配置");
+
+        let outcome = migrate_legacy_data(&home).expect("迁移旧数据");
+        let current = default_data_root(&home);
+
+        assert_eq!(
+            outcome,
+            DataMigrationOutcome::Migrated {
+                from: legacy.clone(),
+                to: current.clone(),
+            }
+        );
+        assert!(!legacy.exists());
+        assert_eq!(
+            fs::read(current.join("config/workspaces.json")).expect("读取迁移后的配置"),
+            b"legacy"
+        );
+        let mode = fs::metadata(&current)
+            .expect("读取新目录权限")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+
+        fs::remove_dir_all(home).expect("清理测试目录");
+    }
+
+    #[test]
+    fn migration_refuses_to_merge_two_existing_data_roots() {
+        let home = temporary_root();
+        let legacy = legacy_data_root(&home);
+        let current = default_data_root(&home);
+        fs::create_dir_all(&legacy).expect("创建旧目录");
+        fs::create_dir_all(&current).expect("创建新目录");
+        fs::write(legacy.join("legacy.txt"), b"legacy").expect("写入旧数据");
+        fs::write(current.join("current.txt"), b"current").expect("写入新数据");
+
+        let error = migrate_legacy_data(&home).expect_err("双目录并存必须拒绝迁移");
+
+        assert!(matches!(
+            error,
+            CoreError::DataRootConflict {
+                legacy: ref actual_legacy,
+                current: ref actual_current,
+            } if actual_legacy == &legacy && actual_current == &current
+        ));
+        assert_eq!(
+            fs::read(legacy.join("legacy.txt")).expect("旧数据仍存在"),
+            b"legacy"
+        );
+        assert_eq!(
+            fs::read(current.join("current.txt")).expect("新数据仍存在"),
+            b"current"
+        );
+
+        fs::remove_dir_all(home).expect("清理测试目录");
+    }
+
+    #[test]
+    fn migration_refuses_a_legacy_root_symbolic_link() {
+        let home = temporary_root();
+        let outside = temporary_root();
+        fs::create_dir_all(&outside).expect("创建链接目标目录");
+        let legacy = legacy_data_root(&home);
+        fs::create_dir_all(legacy.parent().expect("旧目录包含父目录")).expect("创建旧目录父级");
+        symlink(&outside, &legacy).expect("创建旧目录符号链接");
+
+        let error = migrate_legacy_data(&home).expect_err("符号链接必须拒绝迁移");
+
+        assert!(matches!(
+            error,
+            CoreError::UnsafeDataRoot { ref path } if path == &legacy
+        ));
+        assert!(legacy.exists());
+        assert!(outside.exists());
+
+        fs::remove_file(legacy).expect("清理符号链接");
+        fs::remove_dir_all(home).expect("清理测试 home");
+        fs::remove_dir_all(outside).expect("清理链接目标");
     }
 
     #[test]

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+required=(
+  APPLE_SIGNING_IDENTITY
+  APPLE_TEAM_ID
+  APPLE_NOTARY_KEY_ID
+  APPLE_NOTARY_ISSUER_ID
+  APPLE_DEVELOPER_ID_P12_BASE64
+  APPLE_DEVELOPER_ID_P12_PASSWORD
+  APPLE_NOTARY_KEY_P8_BASE64
+)
+
+for name in "${required[@]}"; do
+  if [[ -z "${!name:-}" ]]; then
+    printf '缺少 Release 配置：%s\n' "${name}" >&2
+    exit 1
+  fi
+done
+
+if [[ ! "${APPLE_TEAM_ID}" =~ ^[A-Z0-9]{10}$ ]]; then
+  printf '%s\n' 'APPLE_TEAM_ID 必须是 10 位大写字母或数字。' >&2
+  exit 1
+fi
+if [[ "${APPLE_SIGNING_IDENTITY}" != "Developer ID Application:"*"(${APPLE_TEAM_ID})"* ]]; then
+  printf '%s\n' 'APPLE_SIGNING_IDENTITY 必须是与 APPLE_TEAM_ID 对应的 Developer ID Application identity。' >&2
+  exit 1
+fi
+if [[ ! "${APPLE_NOTARY_KEY_ID}" =~ ^[A-Z0-9]{10}$ ]]; then
+  printf '%s\n' 'APPLE_NOTARY_KEY_ID 必须是 10 位大写字母或数字。' >&2
+  exit 1
+fi
+if [[ ! "${APPLE_NOTARY_ISSUER_ID}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+  printf '%s\n' 'APPLE_NOTARY_ISSUER_ID 必须是 UUID。' >&2
+  exit 1
+fi
+
+for name in APPLE_DEVELOPER_ID_P12_BASE64 APPLE_NOTARY_KEY_P8_BASE64; do
+  if ! printf '%s' "${!name}" | openssl base64 -d -A >/dev/null 2>&1; then
+    printf 'Release Secret 不是有效 Base64：%s\n' "${name}" >&2
+    exit 1
+  fi
+done
+
+printf '%s\n' 'Apple Release 变量与 Secret 结构检查通过；未输出凭据内容。'

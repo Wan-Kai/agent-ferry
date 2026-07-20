@@ -1,0 +1,563 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Ferry — Logo Concepts</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page: #f3f5f8;
+      --surface: rgba(255, 255, 255, 0.88);
+      --surface-solid: #ffffff;
+      --ink: #131720;
+      --muted: #697180;
+      --line: rgba(19, 23, 32, 0.1);
+      --accent: #3867e8;
+      --preview-size: 136px;
+      --shadow: 0 24px 60px rgba(22, 31, 48, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      background:
+        radial-gradient(circle at 12% 2%, rgba(56, 103, 232, 0.09), transparent 28rem),
+        var(--page);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      transition: background-color 180ms ease, color 180ms ease;
+    }
+
+    body[data-theme="dark"] {
+      color-scheme: dark;
+      --page: #0c0f15;
+      --surface: rgba(21, 25, 34, 0.88);
+      --surface-solid: #151922;
+      --ink: #f4f6fb;
+      --muted: #929aaa;
+      --line: rgba(255, 255, 255, 0.1);
+      --shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+      background:
+        radial-gradient(circle at 12% 2%, rgba(91, 129, 255, 0.14), transparent 28rem),
+        var(--page);
+    }
+
+    body[data-color="neutral"] { --mark: #151922; }
+    body[data-theme="dark"][data-color="neutral"] { --mark: #f4f6fb; }
+    body[data-color="blue"] { --mark: #3867e8; }
+    body[data-color="orange"] { --mark: #f06b3c; }
+
+    button, input { font: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+
+    .page {
+      width: min(1240px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 56px 0 72px;
+    }
+
+    .masthead {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 32px;
+      margin-bottom: 38px;
+    }
+
+    .eyebrow {
+      margin: 0 0 12px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(36px, 6vw, 72px);
+      font-weight: 650;
+      letter-spacing: -0.055em;
+      line-height: 0.98;
+    }
+
+    .lede {
+      max-width: 650px;
+      margin: 22px 0 0;
+      color: var(--muted);
+      font-size: 17px;
+      line-height: 1.7;
+    }
+
+    .round-label {
+      flex: 0 0 auto;
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .toolbar {
+      position: sticky;
+      z-index: 20;
+      top: 16px;
+      margin-bottom: 24px;
+      padding: 12px;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--surface);
+      box-shadow: 0 14px 36px rgba(18, 26, 42, 0.08);
+      backdrop-filter: blur(18px);
+    }
+
+    .control-group {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+    }
+
+    .control-group.size { flex: 1; }
+
+    .control-label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 650;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+
+    .swatch {
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      border: 2px solid var(--surface-solid);
+      border-radius: 999px;
+      background: var(--swatch);
+      box-shadow: 0 0 0 1px var(--line);
+      cursor: pointer;
+      transition: transform 140ms ease, box-shadow 140ms ease;
+    }
+
+    .swatch:hover { transform: scale(1.08); }
+    .swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--accent); }
+
+    .theme-button {
+      min-height: 34px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface-solid);
+      color: var(--ink);
+      cursor: pointer;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 20px;
+    }
+
+    .logo-card {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--surface-solid);
+      box-shadow: var(--shadow);
+      transition: transform 180ms ease, border-color 180ms ease;
+    }
+
+    .logo-card:hover {
+      transform: translateY(-3px);
+      border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+    }
+
+    .logo-stage {
+      min-height: 310px;
+      display: grid;
+      place-items: center;
+      background:
+        linear-gradient(var(--line) 1px, transparent 1px),
+        linear-gradient(90deg, var(--line) 1px, transparent 1px),
+        color-mix(in srgb, var(--page) 68%, var(--surface-solid));
+      background-position: center;
+      background-size: 32px 32px;
+      color: var(--mark);
+    }
+
+    .primary-mark {
+      width: var(--preview-size);
+      height: var(--preview-size);
+      filter: drop-shadow(0 14px 16px rgba(13, 22, 38, 0.09));
+      transition: width 180ms ease, height 180ms ease, color 180ms ease;
+    }
+
+    .logo-card:hover .payload { transform: translateX(3px); }
+
+    .payload {
+      transform-box: fill-box;
+      transform-origin: center;
+      transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    .card-copy { padding: 22px 22px 20px; }
+
+    .card-topline {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .card-index {
+      color: var(--muted);
+      font: 600 11px/1 ui-monospace, "SFMono-Regular", Menlo, monospace;
+      letter-spacing: 0.08em;
+    }
+
+    .badge {
+      padding: 6px 9px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--accent) 12%, transparent);
+      color: var(--accent);
+      font-size: 10px;
+      font-weight: 750;
+      letter-spacing: 0.06em;
+    }
+
+    h2 {
+      margin: 12px 0 7px;
+      font-size: 22px;
+      font-weight: 650;
+      letter-spacing: -0.025em;
+    }
+
+    .rationale {
+      min-height: 50px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .wordmark {
+      margin-top: 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--mark);
+      font-size: 17px;
+      letter-spacing: -0.02em;
+    }
+
+    .wordmark svg { width: 30px; height: 30px; }
+    .wordmark strong { font-weight: 700; }
+
+    .card-bottom {
+      margin-top: 18px;
+      padding-top: 16px;
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 18px;
+      border-top: 1px solid var(--line);
+    }
+
+    .size-strip {
+      display: flex;
+      align-items: flex-end;
+      gap: 13px;
+      color: var(--mark);
+    }
+
+    .size-sample {
+      display: grid;
+      justify-items: center;
+      gap: 7px;
+      color: var(--muted);
+      font: 550 9px/1 ui-monospace, "SFMono-Regular", Menlo, monospace;
+    }
+
+    .size-sample svg { color: var(--mark); }
+
+    .download {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 650;
+      text-decoration: none;
+    }
+
+    .download:hover { text-decoration: underline; }
+
+    .footer {
+      margin-top: 40px;
+      padding: 24px 0 0;
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    .footer p { margin: 0; max-width: 600px; }
+
+    @media (max-width: 760px) {
+      .page { width: min(100% - 24px, 620px); padding-top: 32px; }
+      .masthead { display: block; }
+      .round-label { display: inline-block; margin-top: 22px; }
+      .toolbar { flex-wrap: wrap; top: 8px; }
+      .control-group.size { flex-basis: 100%; order: 3; }
+      .grid { grid-template-columns: 1fr; }
+      .logo-stage { min-height: 260px; }
+      .footer { display: block; }
+      .footer p + p { margin-top: 10px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
+    }
+  </style>
+</head>
+<body data-color="neutral">
+  <svg width="0" height="0" aria-hidden="true" style="position:absolute">
+    <defs>
+      <symbol id="mark-01" viewBox="0 0 100 100">
+        <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M35 22h-7a9 9 0 0 0-9 9v38a9 9 0 0 0 9 9h7" stroke-width="10"/>
+        </g>
+        <rect x="72" y="22" width="10" height="56" rx="5" fill="currentColor"/>
+        <rect class="payload" x="36" y="42" width="31" height="16" rx="6" fill="currentColor"/>
+      </symbol>
+      <symbol id="mark-02" viewBox="0 0 100 100">
+        <path d="M20 25a7 7 0 0 1 7-7h49a7 7 0 0 1 0 14H39v12h24a7 7 0 0 1 0 14H39v17a9 9 0 0 1-9 9H20V25Z" fill="currentColor"/>
+        <rect class="payload" x="70" y="43" width="15" height="15" rx="4" fill="currentColor"/>
+      </symbol>
+      <symbol id="mark-03" viewBox="0 0 100 100">
+        <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="9">
+          <path d="m32 22-15 28 15 28"/>
+          <path d="m68 22 15 28-15 28"/>
+        </g>
+        <g fill="currentColor">
+          <circle cx="42" cy="38" r="5"/>
+          <circle cx="58" cy="38" r="5"/>
+          <circle cx="42" cy="62" r="5"/>
+          <circle cx="58" cy="62" r="5"/>
+          <rect class="payload" x="44" y="44" width="12" height="12" rx="4"/>
+        </g>
+      </symbol>
+      <symbol id="mark-04" viewBox="0 0 100 100">
+        <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="8">
+          <path d="M17 27h16c12 0 16 7 22 16"/>
+          <path d="M17 50h39"/>
+          <path d="M17 73h16c12 0 16-7 22-16"/>
+        </g>
+        <path class="payload" d="M54 35h7c11 0 20 6 26 15-6 9-15 15-26 15h-7c5-9 5-21 0-30Z" fill="currentColor"/>
+      </symbol>
+      <symbol id="mark-05" viewBox="0 0 100 100">
+        <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="8">
+          <path d="M25 79V22a6 6 0 0 1 6-6h25l15 15v8"/>
+          <path d="M56 17v15h14"/>
+          <path d="M25 79h27"/>
+          <path d="M39 51h39"/>
+          <path class="payload" d="m68 40 11 11-11 11"/>
+        </g>
+      </symbol>
+      <symbol id="mark-06" viewBox="0 0 100 100">
+        <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="7">
+          <path d="M20 50h23"/>
+          <path d="M57 47c8-2 10-15 19-18"/>
+          <path d="M57 50h19"/>
+          <path d="M57 53c8 2 10 15 19 18"/>
+          <circle cx="18" cy="50" r="7"/>
+          <circle cx="81" cy="27" r="6"/>
+          <circle cx="81" cy="73" r="6"/>
+        </g>
+        <circle cx="50" cy="50" r="12" fill="currentColor"/>
+        <circle class="payload" cx="81" cy="50" r="8" fill="currentColor"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <main class="page">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">Identity exploration · Round 01</p>
+        <h1>Agent Ferry</h1>
+        <p class="lede">六种不同的视觉系统，共同回答一个问题：如何把“完整上下文可靠地交给一个明确的 Agent”压缩成一个在 16px 仍成立的符号。</p>
+      </div>
+      <span class="round-label">2026.07.20</span>
+    </header>
+
+    <section class="toolbar" aria-label="预览控制">
+      <div class="control-group">
+        <span class="control-label">颜色</span>
+        <button class="swatch" type="button" style="--swatch:#151922" data-color="neutral" aria-label="深墨色" aria-pressed="true"></button>
+        <button class="swatch" type="button" style="--swatch:#3867e8" data-color="blue" aria-label="渡运蓝" aria-pressed="false"></button>
+        <button class="swatch" type="button" style="--swatch:#f06b3c" data-color="orange" aria-label="信号橙" aria-pressed="false"></button>
+      </div>
+      <div class="control-group size">
+        <label class="control-label" for="size-control">主图尺寸</label>
+        <input id="size-control" type="range" min="56" max="190" value="136">
+      </div>
+      <button class="theme-button" type="button" aria-pressed="false">切换暗色</button>
+    </section>
+
+    <section class="grid" aria-label="Logo 方向">
+      <article class="logo-card">
+        <div class="logo-stage"><svg class="primary-mark" aria-label="Ferry Gate"><use href="#mark-01"/></svg></div>
+        <div class="card-copy">
+          <div class="card-topline"><span class="card-index">01 / GEOMETRIC</span><span class="badge">当前首选</span></div>
+          <h2>Ferry Gate</h2>
+          <p class="rationale">两端边界是浏览器与 Agent，中间载荷是完整上下文。语义直接、轮廓稳定，也保留“渡口”的品牌隐喻。</p>
+          <div class="wordmark"><svg><use href="#mark-01"/></svg><span>Agent <strong>Ferry</strong></span></div>
+          <div class="card-bottom">
+            <div class="size-strip">
+              <span class="size-sample"><svg width="16" height="16"><use href="#mark-01"/></svg>16</span>
+              <span class="size-sample"><svg width="28" height="28"><use href="#mark-01"/></svg>28</span>
+              <span class="size-sample"><svg width="48" height="48"><use href="#mark-01"/></svg>48</span>
+            </div>
+            <a class="download" href="01-ferry-gate.svg" download>下载 SVG</a>
+          </div>
+        </div>
+      </article>
+
+      <article class="logo-card">
+        <div class="logo-stage"><svg class="primary-mark" aria-label="Ferry Monogram"><use href="#mark-02"/></svg></div>
+        <div class="card-copy">
+          <div class="card-topline"><span class="card-index">02 / MONOGRAM</span></div>
+          <h2>Ferry Monogram</h2>
+          <p class="rationale">把 F 拆成模块化路线，并在中横线末端放置独立载荷。品牌记忆最强，产品含义则更隐性。</p>
+          <div class="wordmark"><svg><use href="#mark-02"/></svg><span>Agent <strong>Ferry</strong></span></div>
+          <div class="card-bottom">
+            <div class="size-strip">
+              <span class="size-sample"><svg width="16" height="16"><use href="#mark-02"/></svg>16</span>
+              <span class="size-sample"><svg width="28" height="28"><use href="#mark-02"/></svg>28</span>
+              <span class="size-sample"><svg width="48" height="48"><use href="#mark-02"/></svg>48</span>
+            </div>
+            <a class="download" href="02-ferry-monogram.svg" download>下载 SVG</a>
+          </div>
+        </div>
+      </article>
+
+      <article class="logo-card">
+        <div class="logo-stage"><svg class="primary-mark" aria-label="Context Capsule"><use href="#mark-03"/></svg></div>
+        <div class="card-copy">
+          <div class="card-topline"><span class="card-index">03 / DOT MATRIX</span></div>
+          <h2>Context Capsule</h2>
+          <p class="rationale">代码括号定义可信边界，内部点阵代表经过结构化提取的内容。开发者气质最明确，但小尺寸最具挑战。</p>
+          <div class="wordmark"><svg><use href="#mark-03"/></svg><span>Agent <strong>Ferry</strong></span></div>
+          <div class="card-bottom">
+            <div class="size-strip">
+              <span class="size-sample"><svg width="16" height="16"><use href="#mark-03"/></svg>16</span>
+              <span class="size-sample"><svg width="28" height="28"><use href="#mark-03"/></svg>28</span>
+              <span class="size-sample"><svg width="48" height="48"><use href="#mark-03"/></svg>48</span>
+            </div>
+            <a class="download" href="03-context-capsule.svg" download>下载 SVG</a>
+          </div>
+        </div>
+      </article>
+
+      <article class="logo-card">
+        <div class="logo-stage"><svg class="primary-mark" aria-label="Converging Wake"><use href="#mark-04"/></svg></div>
+        <div class="card-copy">
+          <div class="card-topline"><span class="card-index">04 / LINE SYSTEM</span></div>
+          <h2>Converging Wake</h2>
+          <p class="rationale">多路页面信息汇聚为一个有方向的载荷，强调提取、归一化和提交。动态感最强，基础设施感较弱。</p>
+          <div class="wordmark"><svg><use href="#mark-04"/></svg><span>Agent <strong>Ferry</strong></span></div>
+          <div class="card-bottom">
+            <div class="size-strip">
+              <span class="size-sample"><svg width="16" height="16"><use href="#mark-04"/></svg>16</span>
+              <span class="size-sample"><svg width="28" height="28"><use href="#mark-04"/></svg>28</span>
+              <span class="size-sample"><svg width="48" height="48"><use href="#mark-04"/></svg>48</span>
+            </div>
+            <a class="download" href="04-converging-wake.svg" download>下载 SVG</a>
+          </div>
+        </div>
+      </article>
+
+      <article class="logo-card">
+        <div class="logo-stage"><svg class="primary-mark" aria-label="Folded Handoff"><use href="#mark-05"/></svg></div>
+        <div class="card-copy">
+          <div class="card-topline"><span class="card-index">05 / MIXED</span></div>
+          <h2>Folded Handoff</h2>
+          <p class="rationale">从页面折角直接延伸出交接通道，最清楚地表达 Browser-to-Agent；未来扩展非页面入口时，含义会偏窄。</p>
+          <div class="wordmark"><svg><use href="#mark-05"/></svg><span>Agent <strong>Ferry</strong></span></div>
+          <div class="card-bottom">
+            <div class="size-strip">
+              <span class="size-sample"><svg width="16" height="16"><use href="#mark-05"/></svg>16</span>
+              <span class="size-sample"><svg width="28" height="28"><use href="#mark-05"/></svg>28</span>
+              <span class="size-sample"><svg width="48" height="48"><use href="#mark-05"/></svg>48</span>
+            </div>
+            <a class="download" href="05-folded-handoff.svg" download>下载 SVG</a>
+          </div>
+        </div>
+      </article>
+
+      <article class="logo-card">
+        <div class="logo-stage"><svg class="primary-mark" aria-label="Dock Network"><use href="#mark-06"/></svg></div>
+        <div class="card-copy">
+          <div class="card-topline"><span class="card-index">06 / NODE NETWORK</span></div>
+          <h2>Dock Network</h2>
+          <p class="rationale">本地 Hub 面向多个兼容目标，但每次只高亮一个目的地。最贴近系统拓扑，也最容易被理解成通用路由产品。</p>
+          <div class="wordmark"><svg><use href="#mark-06"/></svg><span>Agent <strong>Ferry</strong></span></div>
+          <div class="card-bottom">
+            <div class="size-strip">
+              <span class="size-sample"><svg width="16" height="16"><use href="#mark-06"/></svg>16</span>
+              <span class="size-sample"><svg width="28" height="28"><use href="#mark-06"/></svg>28</span>
+              <span class="size-sample"><svg width="48" height="48"><use href="#mark-06"/></svg>48</span>
+            </div>
+            <a class="download" href="06-dock-network.svg" download>下载 SVG</a>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <footer class="footer">
+      <p>建议先按 16px 与 28px 排除不可用方向，再讨论含义和颜色。所有主图均为单色 `currentColor` SVG。</p>
+      <p>Round 01 · Exploration, not final identity</p>
+    </footer>
+  </main>
+
+  <script>
+    const root = document.documentElement;
+    const body = document.body;
+    const themeButton = document.querySelector(".theme-button");
+    const sizeControl = document.querySelector("#size-control");
+    const swatches = [...document.querySelectorAll(".swatch")];
+
+    sizeControl.addEventListener("input", () => {
+      root.style.setProperty("--preview-size", `${sizeControl.value}px`);
+    });
+
+    themeButton.addEventListener("click", () => {
+      const isDark = body.dataset.theme !== "dark";
+      body.dataset.theme = isDark ? "dark" : "light";
+      themeButton.setAttribute("aria-pressed", String(isDark));
+      themeButton.textContent = isDark ? "切换亮色" : "切换暗色";
+    });
+
+    swatches.forEach((swatch) => {
+      swatch.addEventListener("click", () => {
+        body.dataset.color = swatch.dataset.color;
+        swatches.forEach((item) => item.setAttribute("aria-pressed", String(item === swatch)));
+      });
+    });
+  </script>
+</body>
+</html>

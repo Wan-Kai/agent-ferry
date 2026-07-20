@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="280" viewBox="0 0 440 280" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Ferry Chrome Web Store promotional tile</title>
+  <desc id="desc">The Agent Ferry gate carries a web document into an Agent workspace.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#10283A"/>
+      <stop offset="1" stop-color="#183E56"/>
+    </linearGradient>
+    <linearGradient id="wake" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#F06B3C" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#F06B3C"/>
+      <stop offset="1" stop-color="#5CA8FF" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#07131D" flood-opacity="0.34"/>
+    </filter>
+  </defs>
+
+  <rect width="440" height="280" fill="url(#background)"/>
+  <circle cx="64" cy="34" r="94" fill="#3867E8" opacity="0.12"/>
+  <circle cx="405" cy="257" r="128" fill="#5CA8FF" opacity="0.1"/>
+
+  <g transform="translate(36 82)" filter="url(#shadow)">
+    <rect width="116" height="116" rx="27" fill="#3867E8"/>
+    <path d="M46 26H35c-8.284 0-15 6.716-15 15v34c0 8.284 6.716 15 15 15h11" fill="none" stroke="#FFFFFF" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="88" y="25" width="12" height="66" rx="6" fill="#FFFFFF"/>
+    <rect x="48" y="48" width="39" height="20" rx="7" fill="#F06B3C"/>
+  </g>
+
+  <path d="M162 140H272" stroke="url(#wake)" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="194" cy="140" r="5" fill="#F06B3C"/>
+  <circle cx="220" cy="140" r="5" fill="#F49B70"/>
+  <circle cx="246" cy="140" r="5" fill="#77B7FF"/>
+
+  <g transform="translate(273 58)" filter="url(#shadow)">
+    <rect x="0" y="0" width="126" height="91" rx="15" fill="#F8FAFC"/>
+    <circle cx="17" cy="17" r="4" fill="#F06B3C"/>
+    <circle cx="30" cy="17" r="4" fill="#F1B35D"/>
+    <circle cx="43" cy="17" r="4" fill="#4FA879"/>
+    <rect x="15" y="36" width="76" height="8" rx="4" fill="#183E56" opacity="0.85"/>
+    <rect x="15" y="53" width="96" height="6" rx="3" fill="#8BA0AE" opacity="0.58"/>
+    <rect x="15" y="66" width="82" height="6" rx="3" fill="#8BA0AE" opacity="0.42"/>
+  </g>
+
+  <g transform="translate(291 139)" filter="url(#shadow)">
+    <rect width="113" height="82" rx="15" fill="#101C25" stroke="#4D7894"/>
+    <rect x="15" y="17" width="37" height="7" rx="3.5" fill="#65B9FF"/>
+    <path d="M16 41l9 8-9 8" fill="none" stroke="#F06B3C" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="36" y="46" width="54" height="6" rx="3" fill="#D8E7EF" opacity="0.88"/>
+    <circle cx="96" cy="18" r="5" fill="#48B77B"/>
+  </g>
+</svg>

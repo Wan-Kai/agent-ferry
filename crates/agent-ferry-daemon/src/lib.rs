@@ -1,3 +1,11 @@
+//! [INPUT] 已认证 Connector 的 Protocol 命令、用户配置、捕获正文和 Adapter 事件。
+//! [OUTPUT] capability 受限的响应、归一化任务事件与有界本地历史。
+//! [POS] daemon 是运行时组合根，可以选择具体 Adapter；任何下层 crate 都不得反向依赖本模块。
+//! [INVARIANTS] 授权必须在业务分发前完成；页面内容不能影响可执行文件、Workspace 或连接；
+//! Prompt、正文和 Secret 不进入普通日志；并发任务、分块组装、取消和历史更新按 task id 隔离。
+//! [PROTOCOL] Connector 与 capability 见 ADR 0024/0025；历史契约见 ADR 0030；整体数据流见
+//! docs/architecture/overview.md。
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd "${script_dir}/.." && pwd)"
+temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-ferry-extension-release.XXXXXX")"
+trap 'rm -rf "${temporary_root}"' EXIT
+
+identity="${temporary_root}/identity.json"
+printf '%s\n' '{"schema_version":1,"extension_id":"bmbgkcbcohmlbiaigfoilnaobdoonkme","manifest_key":"MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3CvNbwguuAemS1YdwNYfEzexT24vy2+FSgclJUQc1vsHkIpy3xBuWNJ6b2T3fKXfcyyWapQ/Q6pTf9VzSiCa98WSU0aPw1/xZWMRJkkXYaUnWno2fc8B9cD3KZjhs06SiYLozsWQIubPsEq6DMagu3qSiWmA9HPZz0bmtkiTYUrYJrfynoJMBrnoDMTqhzloeaI6GXqKKqYl3zFn3M7lZTXA5sifzAXKQvrIm631Onc3xEdzELCz4sgSpdaxSngly/Wzzw7v/Slo9avIww9QE168A7GelO6Xx1TmpJf+oOk6qhN5kbiKODuB6k1rG5RQHYJL+aoL7MA053VuEblcJQIDAQAB"}' >"${identity}"
+
+"${script_dir}/package-chrome-extension" \
+  --extension-identity "${identity}" \
+  --output-dir "${temporary_root}/release" >/dev/null
+
+archive="${temporary_root}/release/agent-ferry-extension-v0.1.0-chrome.zip"
+[[ -f "${archive}" ]]
+[[ -f "${archive}.sha256" ]]
+/usr/bin/unzip -p "${archive}" manifest.json >"${temporary_root}/manifest.json"
+node_bin="$("${script_dir}/find-node")"
+built_key="$("${node_bin}" -p 'require(process.argv[1]).key' "${temporary_root}/manifest.json")"
+expected_key="$("${node_bin}" "${script_dir}/extension-identity.mjs" "${identity}" manifest_key)"
+[[ "${built_key}" == "${expected_key}" ]]
+"${node_bin}" -e '
+const manifest = require(process.argv[1]);
+const expectedDescription = "Send the current web page and your visible prompt to a local AI Agent or your own remote Hermes.";
+if (manifest.description !== expectedDescription || manifest.description.length > 132) {
+  throw new Error(`发行摘要不符合商店契约：${manifest.description}`);
+}
+if (manifest.host_permissions?.length) throw new Error("发行扩展不得申请持久 host permission");
+const expected = ["activeTab", "nativeMessaging", "scripting", "storage"];
+if (JSON.stringify([...manifest.permissions].sort()) !== JSON.stringify(expected.sort())) {
+  throw new Error(`发行权限不符合最小权限契约：${manifest.permissions}`);
+}
+const expectedIcons = {
+  "16": "icons/icon-16.png",
+  "32": "icons/icon-32.png",
+  "48": "icons/icon-48.png",
+  "128": "icons/icon-128.png",
+};
+if (JSON.stringify(manifest.icons) !== JSON.stringify(expectedIcons)) {
+  throw new Error(`发行图标清单不完整：${JSON.stringify(manifest.icons)}`);
+}
+if (JSON.stringify(manifest.action?.default_icon) !== JSON.stringify(expectedIcons)) {
+  throw new Error(`工具栏图标清单不完整：${JSON.stringify(manifest.action?.default_icon)}`);
+}
+' "${temporary_root}/manifest.json"
+for size in 16 32 48 128; do
+  /usr/bin/unzip -l "${archive}" | grep -q " icons/icon-${size}.png$"
+done
+/usr/bin/unzip -p "${archive}" 'chunks/popup-*.js' >"${temporary_root}/popup.js"
+grep -q '页面正文只会在你点击开始后提取和发送' "${temporary_root}/popup.js"
+grep -q '点击后将提取当前页正文和上方任务指令' "${temporary_root}/popup.js"
+/usr/bin/unzip -l "${archive}" | grep -q ' onboarding.html$'
+/usr/bin/unzip -p "${archive}" 'chunks/onboarding-*.js' >"${temporary_root}/onboarding.js"
+grep -q 'releases/latest/download/install.sh' "${temporary_root}/onboarding.js"
+grep -q 'PRIVACY.md' "${temporary_root}/onboarding.js"
+/usr/bin/unzip -p "${archive}" background.js >"${temporary_root}/background.js"
+grep -q 'onboarding.html' "${temporary_root}/background.js"
+/usr/bin/unzip -l "${archive}" | grep -q ' extract-page.js$'
+if /usr/bin/unzip -l "${archive}" | grep -q 'content-scripts/extract-page.js$'; then
+  printf '%s\n' '页面提取器仍被打包为需要 host permission 的 content script。' >&2
+  exit 1
+fi
+
+cd "${temporary_root}/release"
+/usr/bin/shasum -a 256 -c "$(basename "${archive}.sha256")" >/dev/null
+printf '%s\n' 'Chrome 扩展发行包身份与 SHA256 验证通过'

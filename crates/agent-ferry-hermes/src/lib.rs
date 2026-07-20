@@ -1,6 +1,15 @@
+//! [INPUT] 已校验的 Hermes Connection、CredentialStore 引用、Runs API 输入和远端事件流。
+//! [OUTPUT] capability 诊断、认证请求、Direct/SSH 传输与归一化 Run 事件。
+//! [POS] 本 crate 是 Remote Hermes Adapter；Core 和其他 Adapter 不得依赖其协议或凭据细节。
+//! [INVARIANTS] Secret 只在请求边界取用且不进入配置、Debug、错误和日志；URL 不接受内嵌凭据；
+//! SSH 私钥由系统 SSH 配置持有；断开本地观察不能错误取消远端 Run。
+//! [PROTOCOL] 连接策略见 ADR 0014/0015，凭据与安装边界见 ADR 0021，依赖方向见
+//! docs/architecture/dependency-rules.md。
+
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::net::IpAddr;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -161,6 +170,9 @@ impl HermesConnection {
             // Tunnel 本地端改写为 127.0.0.1；HTTPS 证书通常不包含该地址，首版不允许悄悄降低 TLS 校验。
             return Err(HermesError::SshHttpsUnsupported);
         }
+        if matches!(&transport, HermesTransport::Direct) && !direct_url_is_secure(&base_url) {
+            return Err(HermesError::InsecureDirectUrl);
+        }
         let normalized_path = base_url.path().trim_end_matches('/').to_owned();
         base_url.set_path(if normalized_path.is_empty() {
             "/"
@@ -193,6 +205,23 @@ impl HermesConnection {
         let base = self.endpoint.base_url.as_str().trim_end_matches('/');
         Url::parse(&format!("{base}{path}")).map_err(HermesError::InvalidUrl)
     }
+}
+
+fn direct_url_is_secure(url: &Url) -> bool {
+    if url.scheme() == "https" {
+        return true;
+    }
+    if url.scheme() != "http" {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    // 明文 HTTP 只服务本机开发或由 SSH 加密承载的 loopback 终点，不能把网页正文送往公网。
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 pub trait CredentialStore: Send + Sync {
@@ -411,13 +440,19 @@ pub fn load_connections(path: &Path) -> Result<HermesConnections, HermesError> {
             return Err(HermesError::DuplicateConnection(connection.name.clone()));
         }
         connection.credential_account()?;
-        if let HermesTransport::SshTunnel { ssh_host } = &connection.transport {
-            if !valid_ssh_host(ssh_host) {
-                return Err(HermesError::InvalidSshHost);
+        match &connection.transport {
+            HermesTransport::SshTunnel { ssh_host } => {
+                if !valid_ssh_host(ssh_host) {
+                    return Err(HermesError::InvalidSshHost);
+                }
+                if connection.endpoint.base_url.scheme() != "http" {
+                    return Err(HermesError::SshHttpsUnsupported);
+                }
             }
-            if connection.endpoint.base_url.scheme() != "http" {
-                return Err(HermesError::SshHttpsUnsupported);
+            HermesTransport::Direct if !direct_url_is_secure(&connection.endpoint.base_url) => {
+                return Err(HermesError::InsecureDirectUrl);
             }
+            HermesTransport::Direct => {}
         }
     }
     Ok(connections)
@@ -1020,6 +1055,8 @@ pub enum HermesError {
     InvalidUrl(url::ParseError),
     #[error("Hermes URL 必须是无内嵌凭据、query 或 fragment 的 http(s) 地址")]
     UnsafeUrl,
+    #[error("Direct Hermes 远程地址必须使用 HTTPS；HTTP 仅允许 localhost 或 loopback")]
+    InsecureDirectUrl,
     #[error("SSH host 必须是 ~/.ssh/config 中的单一 host、hostname 或 user@host，且不能以 - 开头")]
     InvalidSshHost,
     #[error("SSH Tunnel 首版只接受 HTTP URL，避免本地端改写主机名后绕过 HTTPS 证书校验")]
@@ -1146,6 +1183,35 @@ mod tests {
             HermesConnection::direct("server", "https://example.com?token=secret", None),
             Err(HermesError::UnsafeUrl)
         ));
+        assert!(matches!(
+            HermesConnection::direct("server", "http://hermes.example.com:8642", None),
+            Err(HermesError::InsecureDirectUrl)
+        ));
+        assert!(HermesConnection::direct("local", "http://127.0.0.1:8642", None).is_ok());
+    }
+
+    #[test]
+    fn loading_connections_rejects_a_forged_insecure_direct_url() {
+        let root = std::env::temp_dir().join(format!("aferry-insecure-direct-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("创建临时目录");
+        let path = root.join("connections.json");
+        let mut connection = HermesConnection::direct("server", "https://hermes.example.com", None)
+            .expect("创建安全 Connection");
+        connection.endpoint.base_url =
+            Url::parse("http://hermes.example.com:8642").expect("构造伪造 URL");
+        fs::write(
+            &path,
+            serde_json::to_vec(&HermesConnections {
+                connections: vec![connection],
+            })
+            .expect("序列化伪造配置"),
+        )
+        .expect("写入伪造配置");
+        assert!(matches!(
+            load_connections(&path),
+            Err(HermesError::InsecureDirectUrl)
+        ));
+        fs::remove_dir_all(root).expect("清理临时目录");
     }
 
     #[test]

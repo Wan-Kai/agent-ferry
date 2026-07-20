@@ -1,3 +1,4 @@
+use std::env;
 use std::fs;
 use std::io::{self, IsTerminal as _, Read, Write as _};
 use std::os::unix::fs::PermissionsExt;
@@ -12,8 +13,8 @@ use agent_ferry_codex::{
 };
 use agent_ferry_core::workspace::{WorkspaceState, diagnose as diagnose_workspace};
 use agent_ferry_core::{
-    AgentFerryPaths, NativeHostManifest, open_ipc_stream, read_native_host_manifest,
-    send_ipc_request,
+    AgentFerryPaths, DataMigrationOutcome, NativeHostManifest, migrate_legacy_data,
+    open_ipc_stream, read_native_host_manifest, send_ipc_request,
 };
 use agent_ferry_hermes::{ConnectionDiagnosis, DiagnosisState, load_connections};
 #[cfg(debug_assertions)]
@@ -32,6 +33,9 @@ use serde::Serialize;
 use uuid::Uuid;
 
 mod hermes_setup;
+mod service;
+mod uninstall;
+mod update;
 
 #[derive(Debug, Parser)]
 #[command(name = "aferry", version, about = "Agent Ferry 本机配置与诊断")]
@@ -66,12 +70,70 @@ enum CliCommand {
         #[command(subcommand)]
         command: WorkspaceCommand,
     },
+    /// 管理 Agent Ferry 自己的用户数据
+    Data {
+        #[command(subcommand)]
+        command: DataCommand,
+    },
+    /// 管理 macOS `agentferryd` `LaunchAgent`
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
+    /// 使用当前版本携带的受信任安装器升级 Agent Ferry
+    Update {
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long)]
+        manifest_url: Option<String>,
+    },
+    /// 卸载 Agent Ferry；默认保留用户数据和凭据
+    Uninstall {
+        #[arg(long)]
+        purge: bool,
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
     /// 仅 Debug 构建提供的本地开发辅助命令
     #[cfg(debug_assertions)]
     Dev {
         #[command(subcommand)]
         command: DevCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCommand {
+    /// 安装并加载当前用户的 `LaunchAgent`
+    Install {
+        #[arg(long)]
+        daemon_path: Option<PathBuf>,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// 加载已经安装的 `LaunchAgent`
+    Start(OutputArgs),
+    /// 停止并卸载当前 LaunchAgent，保留 plist
+    Stop(OutputArgs),
+    /// 重新加载当前 `LaunchAgent`
+    Restart(OutputArgs),
+    /// 查看 launchd 状态、PID 和日志路径
+    Status(OutputArgs),
+    /// 输出最近的 daemon 日志
+    Logs {
+        #[arg(long, default_value_t = 100)]
+        lines: usize,
+    },
+    /// 停止服务并删除 `LaunchAgent` plist，保留日志和用户数据
+    Uninstall(OutputArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum DataCommand {
+    /// 将早期开发版本的数据迁移到 ~/.agent-ferry
+    Migrate(OutputArgs),
 }
 
 #[cfg(debug_assertions)]
@@ -409,8 +471,127 @@ fn run(cli: Cli) -> Result<i32, CliError> {
         Some(CliCommand::Connection { command }) => run_connection_command(command),
         Some(CliCommand::Agent { command }) => run_agent_command(command),
         Some(CliCommand::Workspace { command }) => run_workspace_command(command),
+        Some(CliCommand::Data { command }) => run_data_command(command),
+        Some(CliCommand::Service { command }) => run_service_command(command),
+        Some(CliCommand::Update {
+            version,
+            manifest_url,
+        }) => update::run(version.as_deref(), manifest_url.as_deref()).map_err(Into::into),
+        Some(CliCommand::Uninstall { purge, yes, output }) => {
+            let report = uninstall::run(purge, yes)?;
+            if output.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("Agent Ferry 已卸载");
+                println!("  用户数据: {:?}", report.user_data);
+                println!("  日志: {:?}", report.logs);
+            }
+            Ok(0)
+        }
         #[cfg(debug_assertions)]
         Some(CliCommand::Dev { command }) => run_dev_command(&command),
+    }
+}
+
+fn run_service_command(command: ServiceCommand) -> Result<i32, CliError> {
+    let manager = service::ServiceManager::discover()?;
+    match command {
+        ServiceCommand::Install {
+            daemon_path,
+            output,
+        } => {
+            let report = manager.install(daemon_path.as_deref())?;
+            print_service_report(&report, output.json)?;
+            Ok(0)
+        }
+        ServiceCommand::Start(output) => {
+            let report = manager.start()?;
+            print_service_report(&report, output.json)?;
+            Ok(0)
+        }
+        ServiceCommand::Stop(output) => {
+            let report = manager.stop()?;
+            print_service_report(&report, output.json)?;
+            Ok(0)
+        }
+        ServiceCommand::Restart(output) => {
+            let report = manager.restart()?;
+            print_service_report(&report, output.json)?;
+            Ok(0)
+        }
+        ServiceCommand::Status(output) => {
+            let report = manager.status()?;
+            let running = report.state != service::ServiceState::Stopped;
+            print_service_report(&report, output.json)?;
+            Ok(i32::from(!running))
+        }
+        ServiceCommand::Logs { lines } => {
+            print!("{}", manager.logs(lines)?);
+            Ok(0)
+        }
+        ServiceCommand::Uninstall(output) => {
+            let report = manager.uninstall()?;
+            print_service_report(&report, output.json)?;
+            Ok(0)
+        }
+    }
+}
+
+fn print_service_report(report: &service::ServiceReport, json: bool) -> Result<(), CliError> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+    } else {
+        println!("Agent Ferry service: {:?}", report.state);
+        if let Some(pid) = report.pid {
+            println!("  PID: {pid}");
+        }
+        println!("  LaunchAgent: {}", report.plist.display());
+        println!("  stdout: {}", report.stdout_log.display());
+        println!("  stderr: {}", report.stderr_log.display());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct DataMigrationReport {
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to: Option<PathBuf>,
+}
+
+fn run_data_command(command: DataCommand) -> Result<i32, CliError> {
+    match command {
+        DataCommand::Migrate(output) => {
+            let home = env::var_os("HOME")
+                .map(PathBuf::from)
+                .ok_or(agent_ferry_core::CoreError::HomeDirectoryUnavailable)?;
+            let report = match migrate_legacy_data(&home)? {
+                DataMigrationOutcome::NotNeeded => DataMigrationReport {
+                    state: "not_needed",
+                    from: None,
+                    to: None,
+                },
+                DataMigrationOutcome::Migrated { from, to } => DataMigrationReport {
+                    state: "migrated",
+                    from: Some(from),
+                    to: Some(to),
+                },
+            };
+            if output.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if report.state == "migrated" {
+                println!(
+                    "已迁移 Agent Ferry 数据: {} -> {}",
+                    report.from.as_ref().expect("迁移报告包含旧路径").display(),
+                    report.to.as_ref().expect("迁移报告包含新路径").display()
+                );
+            } else {
+                println!("无需迁移 Agent Ferry 数据");
+            }
+            Ok(0)
+        }
     }
 }
 
@@ -875,7 +1056,10 @@ fn collect_report() -> Result<SetupReport, CliError> {
 
     let mut next_actions = Vec::new();
     if daemon.state != CheckState::Ready {
-        next_actions.push("启动 agentferryd，然后重新运行 aferry doctor".to_owned());
+        next_actions.push(
+            "运行 aferry service status；未安装时执行 aferry service install，然后重新运行 aferry doctor"
+                .to_owned(),
+        );
     }
     if native_host.state != CheckState::Ready {
         next_actions.push(
@@ -1523,6 +1707,12 @@ enum CliError {
     Codex(#[from] agent_ferry_codex::CodexError),
     #[error(transparent)]
     Workspace(#[from] agent_ferry_core::workspace::WorkspaceError),
+    #[error(transparent)]
+    Service(#[from] service::ServiceError),
+    #[error(transparent)]
+    Update(#[from] update::UpdateError),
+    #[error(transparent)]
+    Uninstall(#[from] uninstall::UninstallError),
     #[error("未找到 Workspace: {0}")]
     WorkspaceNotFound(String),
     #[error("请显式传入 --prompt-stdin，Prompt 不允许进入 argv")]

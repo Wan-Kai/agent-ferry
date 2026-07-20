@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+arm64_bin_dir=""
+x86_64_bin_dir=""
+team_id=""
+notary_dir=""
+online_gatekeeper="false"
+evidence_path=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --arm64-bin-dir)
+      arm64_bin_dir="${2:-}"
+      shift 2
+      ;;
+    --x86_64-bin-dir)
+      x86_64_bin_dir="${2:-}"
+      shift 2
+      ;;
+    --team-id)
+      team_id="${2:-}"
+      shift 2
+      ;;
+    --notary-dir)
+      notary_dir="${2:-}"
+      shift 2
+      ;;
+    --online-gatekeeper)
+      online_gatekeeper="true"
+      shift
+      ;;
+    --evidence)
+      evidence_path="${2:-}"
+      shift 2
+      ;;
+    *)
+      printf '未知参数：%s\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "${arm64_bin_dir}" || -z "${x86_64_bin_dir}" || -z "${notary_dir}" || ! "${team_id}" =~ ^[A-Z0-9]{10}$ ]]; then
+  printf '%s\n' '必须提供两个架构的 bin 目录、Notary 证据目录和 Team ID。' >&2
+  exit 2
+fi
+
+codesign_bin="/usr/bin/codesign"
+file_bin="/usr/bin/file"
+spctl_bin="/usr/sbin/spctl"
+if [[ "${AGENT_FERRY_RELEASE_TEST_MODE:-}" == "1" ]]; then
+  codesign_bin="${AGENT_FERRY_CODESIGN_BIN:?测试模式必须提供 AGENT_FERRY_CODESIGN_BIN}"
+  file_bin="${AGENT_FERRY_FILE_BIN:?测试模式必须提供 AGENT_FERRY_FILE_BIN}"
+  spctl_bin="${AGENT_FERRY_SPCTL_BIN:?测试模式必须提供 AGENT_FERRY_SPCTL_BIN}"
+fi
+node_bin="$($(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/find-node)"
+
+verify_notary_evidence() {
+  local architecture="$1"
+  local submission="${notary_dir}/notarization-${architecture}.json"
+  local log="${notary_dir}/notarization-${architecture}.log.json"
+  "${node_bin}" -e '
+for (const path of process.argv.slice(1)) {
+  const value = require(path);
+  if (value.status !== "Accepted") throw new Error(`${path} 状态不是 Accepted`);
+  if (Array.isArray(value.issues) && value.issues.length !== 0) throw new Error(`${path} 仍有 issue`);
+}
+' "${submission}" "${log}"
+}
+
+verify_architecture() {
+  local architecture="$1"
+  local directory="$2"
+  local expected
+  case "${architecture}" in
+    arm64) expected="Mach-O 64-bit executable arm64" ;;
+    x86_64) expected="Mach-O 64-bit executable x86_64" ;;
+  esac
+
+  for binary in aferry agentferryd agentferry-host; do
+    local path="${directory}/${binary}"
+    [[ -f "${path}" && -x "${path}" && ! -L "${path}" ]] || {
+      printf '发行二进制无效：%s\n' "${path}" >&2
+      exit 1
+    }
+    "${file_bin}" "${path}" | grep -Fq "${expected}"
+    "${codesign_bin}" --verify --strict --verbose=2 "${path}"
+    local details
+    details="$("${codesign_bin}" -d --verbose=4 "${path}" 2>&1)"
+    [[ "${details}" == *"Authority=Developer ID Application:"* ]]
+    [[ "${details}" == *"TeamIdentifier=${team_id}"* ]]
+    [[ "${details}" == *"runtime"* ]]
+    if [[ "${online_gatekeeper}" == "true" ]]; then
+      "${spctl_bin}" --assess --type execute --verbose=4 "${path}"
+    fi
+  done
+  verify_notary_evidence "${architecture}"
+}
+
+verify_architecture arm64 "${arm64_bin_dir}"
+verify_architecture x86_64 "${x86_64_bin_dir}"
+if [[ -n "${evidence_path}" ]]; then
+  mkdir -p "$(dirname "${evidence_path}")"
+  arm64_submission_id="$("${node_bin}" -p 'require(process.argv[1]).id' "${notary_dir}/notarization-arm64.json")"
+  x86_64_submission_id="$("${node_bin}" -p 'require(process.argv[1]).id' "${notary_dir}/notarization-x86_64.json")"
+  /usr/bin/plutil -create xml1 "${evidence_path}"
+  /usr/bin/plutil -insert schema_version -integer 1 "${evidence_path}"
+  /usr/bin/plutil -insert verified_at -string "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${evidence_path}"
+  /usr/bin/plutil -insert team_id -string "${team_id}" "${evidence_path}"
+  /usr/bin/plutil -insert online_gatekeeper -bool "${online_gatekeeper}" "${evidence_path}"
+  /usr/bin/plutil -insert notarization -dictionary "${evidence_path}"
+  /usr/bin/plutil -insert notarization.arm64 -string "${arm64_submission_id}" "${evidence_path}"
+  /usr/bin/plutil -insert notarization.x86_64 -string "${x86_64_submission_id}" "${evidence_path}"
+  /usr/bin/plutil -convert json -r "${evidence_path}"
+  chmod 600 "${evidence_path}"
+fi
+printf '%s\n' 'macOS Developer ID、架构、Hardened Runtime、Notary 与 Gatekeeper 证据通过'

@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+bin_dir=""
+architecture=""
+key_path=""
+key_id=""
+issuer_id=""
+output_dir=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --bin-dir)
+      bin_dir="${2:-}"
+      shift 2
+      ;;
+    --architecture)
+      architecture="${2:-}"
+      shift 2
+      ;;
+    --key)
+      key_path="${2:-}"
+      shift 2
+      ;;
+    --key-id)
+      key_id="${2:-}"
+      shift 2
+      ;;
+    --issuer)
+      issuer_id="${2:-}"
+      shift 2
+      ;;
+    --output-dir)
+      output_dir="${2:-}"
+      shift 2
+      ;;
+    *)
+      printf '未知参数：%s\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ ! "${architecture}" =~ ^(arm64|x86_64)$ || -z "${bin_dir}" || -z "${key_path}" || -z "${key_id}" || -z "${issuer_id}" || -z "${output_dir}" ]]; then
+  printf '%s\n' '必须提供架构、bin 目录、App Store Connect API key 和证据输出目录。' >&2
+  exit 2
+fi
+if [[ ! -f "${key_path}" || -L "${key_path}" ]]; then
+  printf 'Notary API key 必须是普通文件：%s\n' "${key_path}" >&2
+  exit 1
+fi
+key_mode="$(/usr/bin/stat -f '%Lp' "${key_path}")"
+if (( (8#${key_mode} & 8#077) != 0 )); then
+  printf 'Notary API key 不能允许 group 或 other 访问：%s（mode %s）\n' "${key_path}" "${key_mode}" >&2
+  exit 1
+fi
+for binary in aferry agentferryd agentferry-host; do
+  [[ -f "${bin_dir}/${binary}" && ! -L "${bin_dir}/${binary}" ]] || {
+    printf '公证输入缺少普通文件：%s\n' "${bin_dir}/${binary}" >&2
+    exit 1
+  }
+done
+
+xcrun_bin="/usr/bin/xcrun"
+if [[ "${AGENT_FERRY_RELEASE_TEST_MODE:-}" == "1" ]]; then
+  xcrun_bin="${AGENT_FERRY_XCRUN_BIN:?测试模式必须提供 AGENT_FERRY_XCRUN_BIN}"
+fi
+
+mkdir -p "${output_dir}"
+temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-ferry-notary.XXXXXX")"
+trap 'rm -rf "${temporary_root}"' EXIT
+payload="${temporary_root}/agent-ferry-darwin-${architecture}.zip"
+COPYFILE_DISABLE=1 /usr/bin/ditto -c -k --keepParent "${bin_dir}" "${payload}"
+
+submission="${output_dir}/notarization-${architecture}.json"
+log="${output_dir}/notarization-${architecture}.log.json"
+"${xcrun_bin}" notarytool submit "${payload}" \
+  --key "${key_path}" \
+  --key-id "${key_id}" \
+  --issuer "${issuer_id}" \
+  --wait \
+  --output-format json >"${submission}"
+
+node_bin="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/find-node"
+node_bin="$("${node_bin}")"
+submission_id="$("${node_bin}" -e '
+const value = require(process.argv[1]);
+if (value.status !== "Accepted" || typeof value.id !== "string" || value.id.length === 0) process.exit(1);
+process.stdout.write(value.id);
+' "${submission}")" || {
+  printf 'Apple 公证没有返回 Accepted；证据：%s\n' "${submission}" >&2
+  exit 1
+}
+
+"${xcrun_bin}" notarytool log "${submission_id}" \
+  --key "${key_path}" \
+  --key-id "${key_id}" \
+  --issuer "${issuer_id}" >"${log}"
+"${node_bin}" -e '
+const value = require(process.argv[1]);
+if (value.status !== "Accepted") throw new Error("Notary log 状态不是 Accepted");
+const issues = Array.isArray(value.issues) ? value.issues : [];
+if (issues.length !== 0) throw new Error(`Notary log 仍有 ${issues.length} 个 issue`);
+' "${log}"
+chmod 600 "${submission}" "${log}"
+
+printf 'Apple 公证通过：darwin-%s，submission %s\n' "${architecture}" "${submission_id}"

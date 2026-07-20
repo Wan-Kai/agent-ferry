@@ -1,0 +1,61 @@
+Agent Ferry｜Chrome Web Store 商品详情（简体中文）
+
+说明
+----
+Agent Ferry 将你正在阅读的网页交给你选择的 AI Agent。
+
+使用前先确认当前页面，选择 Agent 及其运行位置，检查完整任务指令，然后开始交接。你可以在本地任务历史中查看正在运行和已完成的任务。
+
+• 仅当你点击“开始”后，才提取当前文章、X/Twitter 帖子或支持的 arXiv 页面
+• 可将内容发送到指定工作目录中的本地 Claude Code、Codex 或 OpenCode
+• 可将内容发送到你自行配置的远程 Hermes
+• 在本地保存可复用的 Prompt 模板和有上限的任务历史
+• 使用 activeTab 临时权限，不申请对所有网站的永久访问
+
+Agent Ferry 需要安装轻量的 macOS 端 Agent Ferry Core。它不会安装或替代 Claude Code、Codex、OpenCode 或 Hermes。所选 Agent 及其模型服务配置由你负责。
+
+类别
+----
+效率工具（Productivity）
+
+语言
+----
+中文（简体）
+
+全球通用的宣传视频
+--------------------
+留空
+
+官方网页
+--------
+选择“无”。目前不要添加未经 Google Search Console 验证的网站。
+
+首页网址
+--------
+https://github.com/Wan-Kai/agent-ferry
+
+支持信息页面网址
+------------------
+https://github.com/Wan-Kai/agent-ferry/issues
+
+成人内容
+--------
+关闭
+
+商品支持
+--------
+保持开启；用户可以通过公开 Issue Tracker 获得支持。
+
+本次可以上传的图片
+------------------
+商店图标：icon-128.png
+小型宣传图块：promo-small.png
+
+本次暂不上传
+------------
+屏幕截图：正式截图必须来自固定扩展 ID 的最终候选版本，待身份写入正式 ZIP 并完成真实 Chrome 验收后生成。
+顶部宣传图块：可选，首版留空。
+
+操作边界
+--------
+现在只保存商品草稿，不要提交审核，也不要公开发布。

@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  printf '%s\n' '跳过 macOS 签名与公证进程测试：当前不是 macOS。'
+  exit 0
+fi
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-ferry-release-pipeline.XXXXXX")"
+trap 'rm -rf "${temporary_root}"' EXIT
+arm64_dir="${temporary_root}/arm64"
+x86_64_dir="${temporary_root}/x86_64"
+notary_dir="${temporary_root}/notary"
+mkdir -p "${arm64_dir}" "${x86_64_dir}" "${notary_dir}"
+
+for directory in "${arm64_dir}" "${x86_64_dir}"; do
+  for binary in aferry agentferryd agentferry-host; do
+    printf '%s\n' '#!/bin/sh' 'exit 0' >"${directory}/${binary}"
+    chmod 700 "${directory}/${binary}"
+  done
+done
+
+fake_codesign="${temporary_root}/codesign"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'printf "%s\n" "$*" >> "$AGENT_FERRY_RELEASE_LOG/codesign.log"' \
+  'if [ "$1" = "-d" ]; then' \
+  '  printf "%s\n" "Authority=Developer ID Application: Agent Ferry Test (ABCDEFGHIJ)" "TeamIdentifier=ABCDEFGHIJ" "flags=0x10000(runtime)" >&2' \
+  'fi' >"${fake_codesign}"
+
+fake_xcrun="${temporary_root}/xcrun"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'printf "%s\n" "$*" >> "$AGENT_FERRY_RELEASE_LOG/xcrun.log"' \
+  'case "$2" in' \
+  '  submit) printf "%s\n" "{\"id\":\"11111111-2222-3333-4444-555555555555\",\"status\":\"Accepted\"}" ;;' \
+  '  log) printf "%s\n" "{\"jobId\":\"11111111-2222-3333-4444-555555555555\",\"status\":\"Accepted\",\"issues\":[]}" ;;' \
+  '  *) exit 64 ;;' \
+  'esac' >"${fake_xcrun}"
+
+fake_file="${temporary_root}/file"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'case "$1" in' \
+  '  *arm64*) printf "%s: Mach-O 64-bit executable arm64\n" "$1" ;;' \
+  '  *) printf "%s: Mach-O 64-bit executable x86_64\n" "$1" ;;' \
+  'esac' >"${fake_file}"
+
+fake_spctl="${temporary_root}/spctl"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'printf "%s\n" "$*" >> "$AGENT_FERRY_RELEASE_LOG/spctl.log"' >"${fake_spctl}"
+chmod 700 "${fake_codesign}" "${fake_xcrun}" "${fake_file}" "${fake_spctl}"
+
+api_key="${temporary_root}/AuthKey_TEST.p8"
+printf '%s\n' 'fake-private-key-never-logged' >"${api_key}"
+chmod 600 "${api_key}"
+
+export AGENT_FERRY_RELEASE_TEST_MODE=1
+export AGENT_FERRY_RELEASE_LOG="${temporary_root}"
+export AGENT_FERRY_CODESIGN_BIN="${fake_codesign}"
+export AGENT_FERRY_XCRUN_BIN="${fake_xcrun}"
+export AGENT_FERRY_FILE_BIN="${fake_file}"
+export AGENT_FERRY_SPCTL_BIN="${fake_spctl}"
+
+for directory in "${arm64_dir}" "${x86_64_dir}"; do
+  "${script_dir}/sign-macos-release" \
+    --bin-dir "${directory}" \
+    --identity 'Developer ID Application: Agent Ferry Test (ABCDEFGHIJ)' \
+    --team-id ABCDEFGHIJ >/dev/null
+done
+"${script_dir}/notarize-macos-release" \
+  --bin-dir "${arm64_dir}" --architecture arm64 \
+  --key "${api_key}" --key-id TESTKEY123 --issuer 11111111-2222-3333-4444-555555555555 \
+  --output-dir "${notary_dir}" >/dev/null
+"${script_dir}/notarize-macos-release" \
+  --bin-dir "${x86_64_dir}" --architecture x86_64 \
+  --key "${api_key}" --key-id TESTKEY123 --issuer 11111111-2222-3333-4444-555555555555 \
+  --output-dir "${notary_dir}" >/dev/null
+"${script_dir}/verify-macos-release" \
+  --arm64-bin-dir "${arm64_dir}" \
+  --x86_64-bin-dir "${x86_64_dir}" \
+  --team-id ABCDEFGHIJ \
+  --notary-dir "${notary_dir}" \
+  --evidence "${temporary_root}/release-evidence.json" \
+  --online-gatekeeper >/dev/null
+
+grep -q -- '--options runtime --timestamp' "${temporary_root}/codesign.log"
+grep -q -- 'notarytool submit' "${temporary_root}/xcrun.log"
+grep -q -- '--wait --output-format json' "${temporary_root}/xcrun.log"
+grep -q -- 'notarytool log' "${temporary_root}/xcrun.log"
+grep -q -- '--assess --type execute' "${temporary_root}/spctl.log"
+grep -q -- '"online_gatekeeper" : true' "${temporary_root}/release-evidence.json"
+grep -q -- '11111111-2222-3333-4444-555555555555' "${temporary_root}/release-evidence.json"
+if grep -R -q 'fake-private-key-never-logged' "${temporary_root}"/*.log; then
+  printf '%s\n' '发布日志泄露了 Notary private key 内容。' >&2
+  exit 1
+fi
+printf '%s\n' 'macOS 签名、公证、Gatekeeper 发行流程进程测试通过'

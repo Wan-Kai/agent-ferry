@@ -7,31 +7,23 @@ on:
       - main
 
 jobs:
-  rust:
-    name: Rust
+  verify:
+    name: Full verification
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.85.0
           components: clippy,rustfmt
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-
-  extension:
-    name: Chrome extension
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: extension
-    steps:
-      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: extension/package-lock.json
-      - run: npm ci
-      - run: npm run compile
-      - run: npm run build
+      - run: npm --prefix extension ci
+      - run: ./scripts/verify --evidence target/verification-evidence.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verification-evidence
+          path: target/verification-evidence.json

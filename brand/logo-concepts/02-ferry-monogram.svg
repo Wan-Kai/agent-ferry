@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Ferry — Ferry Monogram</title>
+  <desc id="desc">由模块化路径和独立载荷构成的字母 F。</desc>
+  <path d="M20 25a7 7 0 0 1 7-7h49a7 7 0 0 1 0 14H39v12h24a7 7 0 0 1 0 14H39v17a9 9 0 0 1-9 9H20V25Z" fill="currentColor"/>
+  <rect x="70" y="43" width="15" height="15" rx="4" fill="currentColor"/>
+</svg>

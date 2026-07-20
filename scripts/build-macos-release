@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+output_dir=""
+version=""
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd "${script_dir}/.." && pwd)"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --version)
+      version="${2:-}"
+      shift 2
+      ;;
+    --output-dir)
+      output_dir="${2:-}"
+      shift 2
+      ;;
+    *)
+      printf '未知参数：%s\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "${version}" || -z "${output_dir}" ]]; then
+  printf '%s\n' '必须提供 --version 和 --output-dir。' >&2
+  exit 2
+fi
+node_bin="$("${script_dir}/find-node")"
+cd "${repository_root}"
+"${node_bin}" "${script_dir}/check-release-version.mjs" "${version}"
+
+mkdir -p "${output_dir}/arm64" "${output_dir}/x86_64"
+export MACOSX_DEPLOYMENT_TARGET=11.0
+for target in aarch64-apple-darwin x86_64-apple-darwin; do
+  cargo build --locked --release --target "${target}" \
+    -p agent-ferry-cli -p agent-ferry-daemon -p agent-ferry-host
+done
+
+for specification in \
+  "aarch64-apple-darwin:arm64" \
+  "x86_64-apple-darwin:x86_64"; do
+  target="${specification%%:*}"
+  architecture="${specification##*:}"
+  for binary in aferry agentferryd agentferry-host; do
+    cp "target/${target}/release/${binary}" "${output_dir}/${architecture}/${binary}"
+    /usr/bin/strip -x "${output_dir}/${architecture}/${binary}"
+    chmod 755 "${output_dir}/${architecture}/${binary}"
+  done
+done
+
+printf 'macOS 双架构二进制构建完成：%s\n' "${output_dir}"

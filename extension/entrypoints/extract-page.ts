@@ -87,9 +87,7 @@ async function settleXThread(onSnapshot: () => void): Promise<void> {
   throw new Error("X 线程在限定滚动次数内仍在加载，为避免交付不完整内容，请稍后重试");
 }
 
-export default defineContentScript({
-  registration: "runtime",
-  matches: ["http://*/*", "https://*/*"],
+export default defineUnlistedScript({
   async main(): Promise<CapturedPageResult> {
     const initialX = window.scrollX;
     const initialY = window.scrollY;

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Ferry — Ferry Gate</title>
+  <desc id="desc">上下文载荷穿过两个相对的渡口边界。</desc>
+  <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M35 22h-7a9 9 0 0 0-9 9v38a9 9 0 0 0 9 9h7" stroke-width="10"/>
+  </g>
+  <rect x="72" y="22" width="10" height="56" rx="5" fill="currentColor"/>
+  <rect x="36" y="42" width="31" height="16" rx="6" fill="currentColor"/>
+</svg>

@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  printf '%s\n' '跳过 macOS 安装器端到端测试：当前不是 macOS。'
+  exit 0
+fi
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd "${script_dir}/.." && pwd)"
+temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-ferry-installer-test.XXXXXX")"
+trap 'rm -rf "${temporary_root}"' EXIT
+
+fixture_bin="${temporary_root}/fixture-bin"
+release_dir="${temporary_root}/release"
+test_home="${temporary_root}/home with spaces"
+mkdir -p "${fixture_bin}" "${release_dir}" "${test_home}"
+
+extension_identity="${temporary_root}/chrome-extension-identity.json"
+printf '%s\n' '{"schema_version":1,"extension_id":"bmbgkcbcohmlbiaigfoilnaobdoonkme","manifest_key":"MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3CvNbwguuAemS1YdwNYfEzexT24vy2+FSgclJUQc1vsHkIpy3xBuWNJ6b2T3fKXfcyyWapQ/Q6pTf9VzSiCa98WSU0aPw1/xZWMRJkkXYaUnWno2fc8B9cD3KZjhs06SiYLozsWQIubPsEq6DMagu3qSiWmA9HPZz0bmtkiTYUrYJrfynoJMBrnoDMTqhzloeaI6GXqKKqYl3zFn3M7lZTXA5sifzAXKQvrIm631Onc3xEdzELCz4sgSpdaxSngly/Wzzw7v/Slo9avIww9QE168A7GelO6Xx1TmpJf+oOk6qhN5kbiKODuB6k1rG5RQHYJL+aoL7MA053VuEblcJQIDAQAB"}' >"${extension_identity}"
+chmod 600 "${extension_identity}"
+
+cd "${repository_root}"
+cargo build --bins >/dev/null
+for binary in aferry agentferryd agentferry-host; do
+  cp "target/debug/${binary}" "${fixture_bin}/${binary}"
+  /usr/bin/codesign --force --sign - "${fixture_bin}/${binary}" >/dev/null
+done
+
+"${script_dir}/package-macos-release" \
+  --version 0.1.0 \
+  --arm64-bin-dir "${fixture_bin}" \
+  --x86_64-bin-dir "${fixture_bin}" \
+  --output-dir "${release_dir}" \
+  --base-url "file://${release_dir}" \
+  --extension-identity "${extension_identity}" \
+  --team-id "ABCDEFGHIJ"
+grep -q '"signing_team_id" : "ABCDEFGHIJ"' "${release_dir}/release-manifest.json"
+
+fake_codesign="${temporary_root}/fake-codesign"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'if [ "$1" = "--verify" ]; then exec /usr/bin/codesign "$@"; fi' \
+  'printf "%s\n" "Authority=Developer ID Application: Agent Ferry Test (ABCDEFGHIJ)" "TeamIdentifier=${AFERRY_FAKE_SIGNING_TEAM_ID:-ABCDEFGHIJ}" "flags=0x10000(runtime)" >&2' >"${fake_codesign}"
+chmod 700 "${fake_codesign}"
+
+fake_launchctl="${temporary_root}/fake-launchctl"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'printf "%s\n" "$*" >> "$HOME/launchctl-calls.log"' \
+  'case "$1" in' \
+  '  manageruid) printf "%s\n" "501" ;;' \
+  '  print)' \
+  '    if [ -f "$HOME/launchctl-loaded" ]; then' \
+  '      printf "%s\n" "state = running" "pid = 2468"' \
+  '    else' \
+  '      exit 113' \
+  '    fi' \
+  '    ;;' \
+  '  bootstrap)' \
+  '    if [ -f "$HOME/fail-bootstrap" ]; then' \
+  '      rm -f "$HOME/fail-bootstrap"' \
+  '      printf "%s\n" "bootstrap failed" >&2' \
+  '      exit 70' \
+  '    fi' \
+  '    : > "$HOME/launchctl-loaded"' \
+  '    ;;' \
+  '  bootout) rm -f "$HOME/launchctl-loaded" ;;' \
+  '  *) exit 64 ;;' \
+  'esac' >"${fake_launchctl}"
+chmod 700 "${fake_launchctl}"
+
+legacy_root="${test_home}/Library/Application Support/Agent Ferry"
+mkdir -p "${legacy_root}/config"
+printf '%s\n' 'legacy-workspace' >"${legacy_root}/config/workspaces.json"
+
+install_log="${temporary_root}/install.log"
+HOME="${test_home}" \
+AFERRY_LAUNCHCTL_PATH="${fake_launchctl}" \
+AGENT_FERRY_INSTALLER_TEST_MODE=1 \
+AGENT_FERRY_CODESIGN_BIN="${fake_codesign}" \
+AGENT_FERRY_EXPECTED_TEAM_ID="ABCDEFGHIJ" \
+  "${script_dir}/install.sh" \
+    --manifest-url "file://${release_dir}/release-manifest.json" | tee "${install_log}"
+
+install_root="${test_home}/.local/share/agent-ferry"
+[[ "$(readlink "${install_root}/current")" == "versions/0.1.0" ]]
+for binary in aferry agentferryd agentferry-host; do
+  [[ -x "${install_root}/versions/0.1.0/bin/${binary}" ]]
+  [[ -L "${test_home}/.local/bin/${binary}" ]]
+done
+[[ -x "${install_root}/versions/0.1.0/share/install.sh" ]]
+grep -q 'expected_team_id="ABCDEFGHIJ"' "${install_root}/versions/0.1.0/share/install.sh"
+if grep -q '__AGENT_FERRY_SIGNING_TEAM_ID__' "${install_root}/versions/0.1.0/share/install.sh"; then
+  printf '%s\n' '版本包内安装器仍含未渲染 Team ID 占位符。' >&2
+  exit 1
+fi
+[[ "$(<"${test_home}/.agent-ferry/config/workspaces.json")" == "legacy-workspace" ]]
+[[ ! -e "${legacy_root}" ]]
+[[ -f "${test_home}/Library/LaunchAgents/com.agentferry.daemon.plist" ]]
+native_manifest="${test_home}/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.agentferry.host.json"
+[[ -f "${native_manifest}" ]]
+grep -q 'chrome-extension://bmbgkcbcohmlbiaigfoilnaobdoonkme/' "${native_manifest}"
+grep -q '"extension_id" : "bmbgkcbcohmlbiaigfoilnaobdoonkme"' "${test_home}/.agent-ferry/install.json"
+grep -q '"signing_team_id" : "ABCDEFGHIJ"' "${test_home}/.agent-ferry/install.json"
+grep -q '安装完成：Agent Ferry 0.1.0' "${install_log}"
+
+HOME="${test_home}" \
+AGENT_FERRY_HOME="${test_home}/.agent-ferry" \
+AFERRY_LAUNCHCTL_PATH="${fake_launchctl}" \
+  "${test_home}/.local/bin/aferry" service status --json | grep -q '"state": "running"'
+
+HOME="${test_home}" \
+AFERRY_LAUNCHCTL_PATH="${fake_launchctl}" \
+AGENT_FERRY_INSTALLER_TEST_MODE=1 \
+AGENT_FERRY_CODESIGN_BIN="${fake_codesign}" \
+AGENT_FERRY_EXPECTED_TEAM_ID="ABCDEFGHIJ" \
+  "${test_home}/.local/bin/aferry" update \
+    --manifest-url "file://${release_dir}/release-manifest.json" >/dev/null
+
+[[ "$(readlink "${install_root}/current")" == "versions/0.1.0" ]]
+grep -q 'bootstrap gui/501' "${test_home}/launchctl-calls.log"
+
+printf '%s\n' 'keep-previous-version' >"${install_root}/versions/0.1.0/rollback-sentinel"
+printf '%s\n' 'fail' >"${test_home}/fail-bootstrap"
+if HOME="${test_home}" \
+  AFERRY_LAUNCHCTL_PATH="${fake_launchctl}" \
+  AGENT_FERRY_INSTALLER_TEST_MODE=1 \
+  AGENT_FERRY_CODESIGN_BIN="${fake_codesign}" \
+  AGENT_FERRY_EXPECTED_TEAM_ID="ABCDEFGHIJ" \
+  "${test_home}/.local/bin/aferry" update \
+    --manifest-url "file://${release_dir}/release-manifest.json" >"${temporary_root}/failed-update.log" 2>&1; then
+  printf '%s\n' '预期更新 bootstrap 失败，但 update 返回成功。' >&2
+  exit 1
+fi
+grep -q 'bootstrap failed' "${temporary_root}/failed-update.log"
+[[ "$(readlink "${install_root}/current")" == "versions/0.1.0" ]]
+[[ "$(<"${install_root}/versions/0.1.0/rollback-sentinel")" == "keep-previous-version" ]]
+HOME="${test_home}" \
+AGENT_FERRY_HOME="${test_home}/.agent-ferry" \
+AFERRY_LAUNCHCTL_PATH="${fake_launchctl}" \
+  "${test_home}/.local/bin/aferry" service status --json | grep -q '"state": "running"'
+
+failed_home="${temporary_root}/failed-home"
+mkdir -p "${failed_home}"
+printf '%s\n' 'fail' >"${failed_home}/fail-bootstrap"
+if HOME="${failed_home}" \
+  AFERRY_LAUNCHCTL_PATH="${fake_launchctl}" \
+  AGENT_FERRY_INSTALLER_TEST_MODE=1 \
+  AGENT_FERRY_CODESIGN_BIN="${fake_codesign}" \
+  AGENT_FERRY_EXPECTED_TEAM_ID="ABCDEFGHIJ" \
+  "${script_dir}/install.sh" \
+    --manifest-url "file://${release_dir}/release-manifest.json" >"${temporary_root}/failed-install.log" 2>&1; then
+  printf '%s\n' '预期 bootstrap 失败，但安装器返回成功。' >&2
+  exit 1
+fi
+grep -q 'bootstrap failed' "${temporary_root}/failed-install.log"
+[[ ! -e "${failed_home}/.local/share/agent-ferry/current" ]]
+[[ ! -e "${failed_home}/.local/share/agent-ferry/versions/0.1.0" ]]
+[[ ! -e "${failed_home}/.local/bin/aferry" ]]
+[[ ! -e "${failed_home}/Library/LaunchAgents/com.agentferry.daemon.plist" ]]
+
+foreign_signer_home="${temporary_root}/foreign-signer-home"
+mkdir -p "${foreign_signer_home}"
+if HOME="${foreign_signer_home}" \
+  AFERRY_LAUNCHCTL_PATH="${fake_launchctl}" \
+  AGENT_FERRY_INSTALLER_TEST_MODE=1 \
+  AGENT_FERRY_CODESIGN_BIN="${fake_codesign}" \
+  AGENT_FERRY_EXPECTED_TEAM_ID="ABCDEFGHIJ" \
+  AFERRY_FAKE_SIGNING_TEAM_ID="ZZZZZZZZZZ" \
+  "${script_dir}/install.sh" \
+    --manifest-url "file://${release_dir}/release-manifest.json" >"${temporary_root}/foreign-signer.log" 2>&1; then
+  printf '%s\n' '预期非 Agent Ferry Team 签名被拒绝，但安装器返回成功。' >&2
+  exit 1
+fi
+grep -q '签名身份或 Hardened Runtime 校验失败' "${temporary_root}/foreign-signer.log"
+[[ ! -e "${foreign_signer_home}/.local/share/agent-ferry/current" ]]
+
+printf '%s' 'corruption' >>"${release_dir}/agent-ferry-v0.1.0-darwin-arm64.tar.gz"
+checksum_home="${temporary_root}/checksum-home"
+mkdir -p "${checksum_home}"
+if HOME="${checksum_home}" \
+  AFERRY_LAUNCHCTL_PATH="${fake_launchctl}" \
+  AGENT_FERRY_INSTALLER_TEST_MODE=1 \
+  AGENT_FERRY_CODESIGN_BIN="${fake_codesign}" \
+  AGENT_FERRY_EXPECTED_TEAM_ID="ABCDEFGHIJ" \
+  "${script_dir}/install.sh" \
+    --manifest-url "file://${release_dir}/release-manifest.json" >"${temporary_root}/checksum-install.log" 2>&1; then
+  printf '%s\n' '预期 SHA256 校验失败，但安装器返回成功。' >&2
+  exit 1
+fi
+grep -q 'SHA256 不匹配' "${temporary_root}/checksum-install.log"
+[[ ! -e "${checksum_home}/.local/share/agent-ferry/current" ]]
+
+printf '%s\n' "安装器端到端测试通过；日志：${install_log}"

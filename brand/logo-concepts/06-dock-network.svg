@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Ferry — Dock Network</title>
+  <desc id="desc">本地交接中枢将载荷路由到一个选定 Agent。</desc>
+  <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="7">
+    <path d="M20 50h23"/>
+    <path d="M57 47c8-2 10-15 19-18"/>
+    <path d="M57 50h19"/>
+    <path d="M57 53c8 2 10 15 19 18"/>
+    <circle cx="18" cy="50" r="7"/>
+    <circle cx="81" cy="27" r="6"/>
+    <circle cx="81" cy="73" r="6"/>
+  </g>
+  <circle cx="50" cy="50" r="12" fill="currentColor"/>
+  <circle cx="81" cy="50" r="8" fill="currentColor"/>
+</svg>

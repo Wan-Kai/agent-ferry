@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+bin_dir=""
+identity=""
+team_id=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --bin-dir)
+      bin_dir="${2:-}"
+      shift 2
+      ;;
+    --identity)
+      identity="${2:-}"
+      shift 2
+      ;;
+    --team-id)
+      team_id="${2:-}"
+      shift 2
+      ;;
+    *)
+      printf '未知参数：%s\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "${bin_dir}" || -z "${identity}" || ! "${team_id}" =~ ^[A-Z0-9]{10}$ ]]; then
+  printf '%s\n' '必须提供 bin 目录、Developer ID Application identity 和 10 位 Team ID。' >&2
+  exit 2
+fi
+
+codesign_bin="/usr/bin/codesign"
+if [[ "${AGENT_FERRY_RELEASE_TEST_MODE:-}" == "1" ]]; then
+  codesign_bin="${AGENT_FERRY_CODESIGN_BIN:?测试模式必须提供 AGENT_FERRY_CODESIGN_BIN}"
+fi
+
+for binary in aferry agentferryd agentferry-host; do
+  path="${bin_dir}/${binary}"
+  if [[ ! -f "${path}" || ! -x "${path}" || -L "${path}" ]]; then
+    printf '发行二进制必须是普通可执行文件：%s\n' "${path}" >&2
+    exit 1
+  fi
+  "${codesign_bin}" --force --sign "${identity}" --options runtime --timestamp "${path}"
+  "${codesign_bin}" --verify --strict --verbose=2 "${path}"
+  details="$("${codesign_bin}" -d --verbose=4 "${path}" 2>&1)"
+  if [[ "${details}" != *"Authority=Developer ID Application:"* ||
+        "${details}" != *"TeamIdentifier=${team_id}"* ||
+        "${details}" != *"runtime"* ]]; then
+    printf '签名身份、Team 或 Hardened Runtime 校验失败：%s\n' "${path}" >&2
+    exit 1
+  fi
+done
+
+printf 'Developer ID 签名完成：%s\n' "${bin_dir}"

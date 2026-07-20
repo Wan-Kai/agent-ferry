@@ -1,0 +1,180 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "源码中的 SemVer；手动运行只生成 RC 产物，不创建 GitHub Release"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    name: Signed and notarized macOS release
+    runs-on: macos-14
+    environment: release
+    env:
+      APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+      APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+      APPLE_NOTARY_KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
+      APPLE_NOTARY_ISSUER_ID: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve release version
+        id: release
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="${{ inputs.version }}"
+          fi
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
+            echo "无效发行版本：${version}" >&2
+            exit 2
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.85.0
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          components: clippy,rustfmt
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - run: npm --prefix extension ci
+      - name: Validate release configuration without exposing secrets
+        env:
+          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+        run: ./scripts/check-release-environment
+      - name: Verify source and extension identity
+        run: |
+          "$(./scripts/find-node)" scripts/check-release-version.mjs "${{ steps.release.outputs.version }}"
+          "$(./scripts/find-node)" scripts/extension-identity.mjs release/chrome-extension-identity.json
+          ./scripts/verify --require-clean
+      - name: Build both macOS architectures
+        run: |
+          ./scripts/build-macos-release \
+            --version "${{ steps.release.outputs.version }}" \
+            --output-dir target/release-binaries
+      - name: Import Developer ID and Notary credentials
+        env:
+          DEVELOPER_ID_P12: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+        shell: bash
+        run: |
+          signing_keychain="${RUNNER_TEMP}/agent-ferry-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          printf '%s' "${DEVELOPER_ID_P12}" | openssl base64 -d -A > "${RUNNER_TEMP}/developer-id.p12"
+          printf '%s' "${NOTARY_KEY_P8}" | openssl base64 -d -A > "${RUNNER_TEMP}/AuthKey.p8"
+          chmod 600 "${RUNNER_TEMP}/developer-id.p12" "${RUNNER_TEMP}/AuthKey.p8"
+          security create-keychain -p "${keychain_password}" "${signing_keychain}"
+          security set-keychain-settings -lut 21600 "${signing_keychain}"
+          security unlock-keychain -p "${keychain_password}" "${signing_keychain}"
+          security import "${RUNNER_TEMP}/developer-id.p12" \
+            -k "${signing_keychain}" -P "${DEVELOPER_ID_PASSWORD}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "${keychain_password}" "${signing_keychain}"
+          security list-keychains -d user -s "${signing_keychain}"
+          echo "SIGNING_KEYCHAIN=${signing_keychain}" >> "${GITHUB_ENV}"
+      - name: Sign, notarize and assess
+        run: |
+          for architecture in arm64 x86_64; do
+            ./scripts/sign-macos-release \
+              --bin-dir "target/release-binaries/${architecture}" \
+              --identity "${APPLE_SIGNING_IDENTITY}" \
+              --team-id "${APPLE_TEAM_ID}"
+            ./scripts/notarize-macos-release \
+              --bin-dir "target/release-binaries/${architecture}" \
+              --architecture "${architecture}" \
+              --key "${RUNNER_TEMP}/AuthKey.p8" \
+              --key-id "${APPLE_NOTARY_KEY_ID}" \
+              --issuer "${APPLE_NOTARY_ISSUER_ID}" \
+              --output-dir target/notary-evidence
+          done
+          ./scripts/verify-macos-release \
+            --arm64-bin-dir target/release-binaries/arm64 \
+            --x86_64-bin-dir target/release-binaries/x86_64 \
+            --team-id "${APPLE_TEAM_ID}" \
+            --notary-dir target/notary-evidence \
+            --evidence target/release-evidence/macos.json \
+            --online-gatekeeper
+      - name: Package public artifacts
+        run: |
+          mkdir -p target/distribution
+          ./scripts/package-macos-release \
+            --version "${{ steps.release.outputs.version }}" \
+            --arm64-bin-dir target/release-binaries/arm64 \
+            --x86_64-bin-dir target/release-binaries/x86_64 \
+            --output-dir target/distribution \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${{ steps.release.outputs.version }}" \
+            --extension-identity release/chrome-extension-identity.json \
+            --team-id "${APPLE_TEAM_ID}"
+          ./scripts/package-chrome-extension \
+            --extension-identity release/chrome-extension-identity.json \
+            --output-dir target/distribution
+          "$(./scripts/find-node)" scripts/render-installer.mjs \
+            scripts/install.sh target/distribution/install.sh "${APPLE_TEAM_ID}"
+          /usr/bin/shasum -a 256 target/distribution/install.sh > target/distribution/install.sh.sha256
+      - name: Bind verification evidence to artifacts
+        run: |
+          evidence_args=(
+            --require-clean
+            --evidence target/release-evidence/verification.json
+            --artifact target/distribution/agent-ferry-v${{ steps.release.outputs.version }}-darwin-arm64.tar.gz
+            --artifact target/distribution/agent-ferry-v${{ steps.release.outputs.version }}-darwin-x86_64.tar.gz
+            --artifact target/distribution/agent-ferry-extension-v${{ steps.release.outputs.version }}-chrome.zip
+            --artifact target/distribution/release-manifest.json
+            --artifact target/distribution/install.sh
+            --artifact target/release-evidence/macos.json
+            --artifact target/notary-evidence/notarization-arm64.json
+            --artifact target/notary-evidence/notarization-arm64.log.json
+            --artifact target/notary-evidence/notarization-x86_64.json
+            --artifact target/notary-evidence/notarization-x86_64.log.json
+          )
+          ./scripts/verify "${evidence_args[@]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-ferry-v${{ steps.release.outputs.version }}-release-candidate
+          if-no-files-found: error
+          path: |
+            target/distribution/
+            target/notary-evidence/
+            target/release-evidence/
+      - name: Publish immutable GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            target/distribution/agent-ferry-v${{ steps.release.outputs.version }}-darwin-arm64.tar.gz \
+            target/distribution/agent-ferry-v${{ steps.release.outputs.version }}-darwin-x86_64.tar.gz \
+            target/distribution/agent-ferry-extension-v${{ steps.release.outputs.version }}-chrome.zip \
+            target/distribution/release-manifest.json \
+            target/distribution/checksums.txt \
+            target/distribution/install.sh \
+            target/distribution/install.sh.sha256 \
+            --verify-tag \
+            --generate-notes \
+            --title "Agent Ferry ${GITHUB_REF_NAME}"
+      - name: Remove imported credentials
+        if: always()
+        shell: bash
+        run: |
+          security delete-keychain "${SIGNING_KEYCHAIN:-${RUNNER_TEMP}/agent-ferry-signing.keychain-db}" 2>/dev/null || true
+          rm -f "${RUNNER_TEMP}/developer-id.p12" "${RUNNER_TEMP}/AuthKey.p8"

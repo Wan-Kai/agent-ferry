@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd "${script_dir}/.." && pwd)"
+node_bin="$("${script_dir}/find-node")"
+node_directory="$(dirname "${node_bin}")"
+npm_bin="${node_directory}/npm"
+evidence_path=""
+require_clean="false"
+artifacts=()
+artifact_count=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --evidence)
+      evidence_path="${2:-}"
+      shift 2
+      ;;
+    --artifact)
+      artifacts+=("${2:-}")
+      artifact_count=$((artifact_count + 1))
+      shift 2
+      ;;
+    --require-clean)
+      require_clean="true"
+      shift
+      ;;
+    *)
+      printf '未知参数：%s\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ ! -x "${npm_bin}" ]]; then
+  printf 'Node 目录中缺少 npm：%s\n' "${npm_bin}" >&2
+  exit 1
+fi
+
+cd "${repository_root}"
+export PATH="${node_directory}:${PATH}"
+
+if [[ "${require_clean}" == "true" && -n "$(git status --porcelain)" ]]; then
+  printf '%s\n' 'RC 验证要求干净工作区；当前仍有未提交变更。' >&2
+  exit 1
+fi
+
+"${node_bin}" "${script_dir}/check-toolchain.mjs"
+"${node_bin}" "${script_dir}/check-architecture-boundaries.mjs"
+"${node_bin}" "${script_dir}/check-documentation-contract.mjs"
+"${node_bin}" "${script_dir}/check-document-links.mjs"
+"${node_bin}" "${script_dir}/check-release-version.mjs"
+"${node_bin}" "${script_dir}/check-store-readiness.mjs"
+"${node_bin}" "${script_dir}/test-extension-identity.mjs"
+"${script_dir}/test-extension-release"
+"${script_dir}/test-release-environment"
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  "${script_dir}/test-macos-installer"
+  "${script_dir}/test-release-pipeline"
+fi
+"${npm_bin}" --prefix extension test
+"${npm_bin}" --prefix extension run compile
+"${npm_bin}" --prefix extension run build
+
+if [[ -n "${evidence_path}" ]]; then
+  evidence_args=(--output "${evidence_path}")
+  if [[ ${artifact_count} -gt 0 ]]; then
+    for artifact in "${artifacts[@]}"; do
+      evidence_args+=(--artifact "${artifact}")
+    done
+  fi
+  "${node_bin}" "${script_dir}/write-verification-evidence.mjs" "${evidence_args[@]}"
+fi
+
+printf '%s\n' '完整工程门禁通过。真实环境行为仍需按验收 Runbook 单独验证。'

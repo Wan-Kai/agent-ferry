@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repository_root="$(git rev-parse --show-toplevel)"
+cd "${repository_root}"
+
+# pre-commit 只运行快速、确定的契约检查，避免把完整 workspace 测试变成每次提交的
+# 长阻塞。提交前仍应显式运行 ./scripts/verify，CI 也会执行完整门禁。
+./scripts/check-architecture
+./scripts/check-docs
+./scripts/check-links
+cargo fmt --all -- --check

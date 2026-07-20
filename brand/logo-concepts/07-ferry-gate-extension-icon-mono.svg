@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Ferry — Ferry Gate 单色图标</title>
+  <desc id="desc">用于工具栏、单色印刷和反白场景的 Ferry Gate 符号。</desc>
+  <path d="M35 22h-7a9 9 0 0 0-9 9v38a9 9 0 0 0 9 9h7" fill="none" stroke="#151922" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="72" y="22" width="10" height="56" rx="5" fill="#151922"/>
+  <rect x="36" y="42" width="31" height="16" rx="6" fill="#151922"/>
+</svg>
