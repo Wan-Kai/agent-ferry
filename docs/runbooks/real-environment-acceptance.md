@@ -27,6 +27,9 @@
 
 ### macOS 本机边界
 
+- Release workflow 已在干净 macOS runner 上强制执行隔离 Homebrew 生命周期 E2E，并保存绑定到
+  RC 的 `homebrew-e2e.log`；它使用 fake `launchctl`，真实 launchd、Keychain 和宿主 Agent 仍按
+  下列 Case 延迟验收。
 - 通过 `brew install Wan-Kai/tap/agent-ferry` 完成无 sudo 安装；验证 Homebrew keg/opt、LaunchAgent 和 Chrome Native Host 各自落在约定路径，并核对 Formula SHA256 与 Artifact Attestation。
 - 验证 `brew upgrade` 后 daemon 切换到新 keg；`aferry uninstall` 只清理运行资源，随后 `brew uninstall` 删除程序。
 - 真实 Keychain create/read/delete smoke，输出中不出现 Secret。

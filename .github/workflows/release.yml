@@ -74,6 +74,10 @@ jobs:
           ./scripts/package-chrome-extension \
             --extension-identity release/chrome-extension-identity.json \
             --output-dir target/distribution
+      - name: Verify real Homebrew install lifecycle
+        run: |
+          ./scripts/test-homebrew-install 2>&1 | \
+            tee target/release-evidence/homebrew-e2e.log
       - name: Bind verification evidence to artifacts
         run: |
           evidence_args=(
@@ -84,6 +88,7 @@ jobs:
             --artifact target/distribution/agent-ferry-extension-v${{ steps.release.outputs.version }}-chrome.zip
             --artifact target/distribution/agent-ferry.rb
             --artifact target/distribution/checksums.txt
+            --artifact target/release-evidence/homebrew-e2e.log
           )
           ./scripts/verify "${evidence_args[@]}"
       - uses: actions/attest-build-provenance@v3
