@@ -579,7 +579,11 @@ mod tests {
     use uuid::Uuid;
 
     fn temporary_root() -> PathBuf {
-        PathBuf::from(format!("/tmp/af-claude-{}", Uuid::new_v4().simple()))
+        // 部分 CI 会把系统临时目录挂载为 noexec；fake CLI 必须位于可执行的构建目录，
+        // 否则“不兼容”用例会因权限错误假通过，并掩盖后续认证状态断言。
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-tmp/agent-ferry-claude")
+            .join(Uuid::new_v4().simple().to_string())
     }
 
     fn fake_claude(root: &Path, name: &str, help: &str, logged_in: bool) -> PathBuf {
