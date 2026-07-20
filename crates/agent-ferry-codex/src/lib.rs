@@ -586,10 +586,10 @@ fn execute_app_server(
                 emit,
             ),
             Some("item/started") => {
-                if let Some(kind) = value.pointer("/params/item/type").and_then(Value::as_str)
-                    && matches!(kind, "commandExecution" | "mcpToolCall" | "webSearch")
-                {
-                    emit(CodexTaskEvent::Tool(format!("Codex App: {kind}")));
+                if let Some(kind) = value.pointer("/params/item/type").and_then(Value::as_str) {
+                    if matches!(kind, "commandExecution" | "mcpToolCall" | "webSearch") {
+                        emit(CodexTaskEvent::Tool(format!("Codex App: {kind}")));
+                    }
                 }
             }
             Some("item/completed") if output.is_empty() => {
@@ -629,11 +629,11 @@ fn execute_app_server(
 }
 
 fn append_output(text: Option<&str>, output: &mut String, emit: &mut impl FnMut(CodexTaskEvent)) {
-    if let Some(text) = text
-        && !text.is_empty()
-    {
-        output.push_str(text);
-        emit(CodexTaskEvent::Output(text.to_owned()));
+    if let Some(text) = text {
+        if !text.is_empty() {
+            output.push_str(text);
+            emit(CodexTaskEvent::Output(text.to_owned()));
+        }
     }
 }
 

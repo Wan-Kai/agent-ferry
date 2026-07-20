@@ -652,10 +652,10 @@ fn run_workspace_command(command: WorkspaceCommand) -> Result<i32, CliError> {
                 })
                 .map(diagnose_workspace)
                 .collect::<Vec<_>>();
-            if let Some(identifier) = identifier
-                && selected.is_empty()
-            {
-                return Err(CliError::WorkspaceNotFound(identifier));
+            if let Some(identifier) = identifier {
+                if selected.is_empty() {
+                    return Err(CliError::WorkspaceNotFound(identifier));
+                }
             }
             let ready = selected
                 .iter()
@@ -1472,10 +1472,10 @@ fn diagnoses_from_targets(
             identifier.is_none_or(|value| connection.id == value || connection.name == value)
         })
         .collect::<Vec<_>>();
-    if let Some(identifier) = identifier
-        && selected.is_empty()
-    {
-        return Err(CliError::ConnectionNotFound(identifier.to_owned()));
+    if let Some(identifier) = identifier {
+        if selected.is_empty() {
+            return Err(CliError::ConnectionNotFound(identifier.to_owned()));
+        }
     }
     let mut diagnoses = Vec::with_capacity(selected.len());
     for connection in selected {

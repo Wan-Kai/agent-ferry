@@ -143,12 +143,12 @@ impl HistoryRepository {
                 record.summary.state = TaskHistoryState::Completed;
                 "已完成".clone_into(&mut record.summary.stage);
                 record.summary.completed_at_ms = Some(now);
-                if let Some(text) = &event.text
-                    && !text.trim().is_empty()
-                {
-                    record.output.clear();
-                    record.output_truncated = false;
-                    append_bounded(&mut record.output, text, &mut record.output_truncated);
+                if let Some(text) = &event.text {
+                    if !text.trim().is_empty() {
+                        record.output.clear();
+                        record.output_truncated = false;
+                        append_bounded(&mut record.output, text, &mut record.output_truncated);
+                    }
                 }
             }
             HandoffEventKind::Failed => {

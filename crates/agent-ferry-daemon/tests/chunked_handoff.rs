@@ -186,19 +186,19 @@ async fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
         let read = stream.read(&mut buffer).await.expect("读取 Hermes 请求");
         assert!(read > 0, "Hermes 请求不应提前结束");
         request.extend_from_slice(&buffer[..read]);
-        if expected_length.is_none()
-            && let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
-        {
-            let headers = String::from_utf8_lossy(&request[..header_end]);
-            let content_length = headers
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().expect("Content-Length 合法"))
-                })
-                .unwrap_or(0);
-            expected_length = Some(header_end + 4 + content_length);
+        if expected_length.is_none() {
+            if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().expect("Content-Length 合法"))
+                    })
+                    .unwrap_or(0);
+                expected_length = Some(header_end + 4 + content_length);
+            }
         }
         if expected_length.is_some_and(|length| request.len() >= length) {
             return request;

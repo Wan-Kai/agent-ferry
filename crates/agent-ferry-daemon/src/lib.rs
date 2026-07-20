@@ -955,10 +955,10 @@ async fn record_and_forward_event(
     history: Option<&Mutex<HistoryRepository>>,
     event: &HandoffEvent,
 ) {
-    if let Some(history) = history
-        && let Err(error) = history.lock().await.apply_event(event)
-    {
-        warn!(task_id = event.task_id, error = %error, "持久化任务历史失败");
+    if let Some(history) = history {
+        if let Err(error) = history.lock().await.apply_event(event) {
+            warn!(task_id = event.task_id, error = %error, "持久化任务历史失败");
+        }
     }
     if *observer_connected && write_async_json(stream, event).await.is_err() {
         *observer_connected = false;
@@ -1252,10 +1252,10 @@ async fn stream_opencode_updates(
                 );
                 let _ = sender.blocking_send(event);
             });
-        if let Err(error) = result
-            && !terminal_emitted
-        {
-            let _ = sender.blocking_send(OpenCodeTaskEvent::Failed(error.to_string()));
+        if !terminal_emitted {
+            if let Err(error) = result {
+                let _ = sender.blocking_send(OpenCodeTaskEvent::Failed(error.to_string()));
+            }
         }
     });
 
@@ -1397,10 +1397,10 @@ async fn stream_claude_updates(
                 let _ = sender.blocking_send(event);
             },
         );
-        if let Err(error) = result
-            && !terminal_emitted
-        {
-            let _ = sender.blocking_send(ClaudeTaskEvent::Failed(error.to_string()));
+        if !terminal_emitted {
+            if let Err(error) = result {
+                let _ = sender.blocking_send(ClaudeTaskEvent::Failed(error.to_string()));
+            }
         }
     });
 
@@ -1543,10 +1543,10 @@ async fn stream_codex_updates(
                 let _ = sender.blocking_send(event);
             },
         );
-        if let Err(error) = result
-            && !terminal_emitted
-        {
-            let _ = sender.blocking_send(CodexTaskEvent::Failed(error.to_string()));
+        if !terminal_emitted {
+            if let Err(error) = result {
+                let _ = sender.blocking_send(CodexTaskEvent::Failed(error.to_string()));
+            }
         }
     });
 
