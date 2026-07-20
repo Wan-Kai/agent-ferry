@@ -16,7 +16,7 @@
 
 - 使用生产构建或明确记录 commit 的 unpacked Extension。
 - 全新安装只打开一次 onboarding；页面给出可复制的 Core 安装命令，安装前显示未连接，Core 安装后“重新检查”显示具体版本。
-- 生产构建必须记录 Dashboard Item ID，并确认 ZIP manifest 的 `key` 推导结果、Core `release-manifest.json` 的 `extension_id` 与 Native Host `allowed_origins` 完全一致。
+- 生产构建必须记录 Dashboard Item ID，并确认 ZIP manifest 的 `key` 推导结果、Homebrew Formula 的扩展 ID 与 Native Host `allowed_origins` 完全一致。
 - 检查 manifest 只有 `activeTab`、`scripting`、`nativeMessaging`、`storage`，没有 `host_permissions`；未点击开始时不能读取页面正文。
 - 发送页必须在按钮前展示将提取当前页正文、可见 Prompt 和所选目的地；切换本地/远程位置后披露同步更新。
 - 验证普通页面、懒加载页面、X、arXiv HTML/PDF、空正文和超限错误。
@@ -27,7 +27,8 @@
 
 ### macOS 本机边界
 
-- 从 GitHub Release 的一行 curl 命令完成无 sudo 安装；验证 `~/.local/share/agent-ferry`、`~/.local/bin`、LaunchAgent 和 Chrome Native Host 各自落在约定路径。
+- 通过 `brew install Wan-Kai/tap/agent-ferry` 完成无 sudo 安装；验证 Homebrew keg/opt、LaunchAgent 和 Chrome Native Host 各自落在约定路径，并核对 Formula SHA256 与 Artifact Attestation。
+- 验证 `brew upgrade` 后 daemon 切换到新 keg；`aferry uninstall` 只清理运行资源，随后 `brew uninstall` 删除程序。
 - 真实 Keychain create/read/delete smoke，输出中不出现 Secret。
 - Native Host manifest、私有 Socket、文件权限和 daemon 生命周期。
 - 已安装 Claude、Codex、OpenCode 的检测、认证提示和一次性任务。

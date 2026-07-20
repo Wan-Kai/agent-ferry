@@ -482,7 +482,12 @@ fn run(cli: Cli) -> Result<i32, CliError> {
             if output.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
-                println!("Agent Ferry 已卸载");
+                if report.program == uninstall::RemovalState::ManagedExternally {
+                    println!("Agent Ferry 运行资源已移除；程序文件仍由 Homebrew 管理");
+                    println!("  下一步: brew uninstall Wan-Kai/tap/agent-ferry");
+                } else {
+                    println!("Agent Ferry 已卸载");
+                }
                 println!("  用户数据: {:?}", report.user_data);
                 println!("  日志: {:?}", report.logs);
             }

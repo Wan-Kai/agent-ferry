@@ -53,7 +53,7 @@ grep -q '页面正文只会在你点击开始后提取和发送' "${temporary_ro
 grep -q '点击后将提取当前页正文和上方任务指令' "${temporary_root}/popup.js"
 /usr/bin/unzip -l "${archive}" | grep -q ' onboarding.html$'
 /usr/bin/unzip -p "${archive}" 'chunks/onboarding-*.js' >"${temporary_root}/onboarding.js"
-grep -q 'releases/latest/download/install.sh' "${temporary_root}/onboarding.js"
+grep -q 'brew install Wan-Kai/tap/agent-ferry' "${temporary_root}/onboarding.js"
 grep -q 'PRIVACY.md' "${temporary_root}/onboarding.js"
 /usr/bin/unzip -p "${archive}" background.js >"${temporary_root}/background.js"
 grep -q 'onboarding.html' "${temporary_root}/background.js"

@@ -32,17 +32,22 @@ scripts/                 上下文、工程门禁与证据工具
 ./scripts/verify
 ```
 
-普通用户未来使用预编译产物，不需要安装 Rust 或 Node.js。
-
-正式 Release 发布后，macOS 用户使用一条命令安装轻量 Core，不需要 `sudo`：
+普通用户使用 Homebrew 管理的架构专用预编译产物，不需要安装 Rust、Node.js，也不需要
+Apple Developer 账号。macOS 安装轻量 Core：
 
 ```bash
-curl -fsSL https://github.com/Wan-Kai/agent-ferry/releases/latest/download/install.sh | bash
+brew install Wan-Kai/tap/agent-ferry
 ```
 
-macOS 安装器、双架构发行包以及 Developer ID 签名、公证和 GitHub Release 流水线已经实现。正式运行仍需配置 Apple 发布凭据和 Chrome 固定扩展身份；仓库中的 `scripts/install.sh` 是等待发行流程写入 Apple Team ID 的模板，普通用户应使用 GitHub Release 中生成的安装器。
+需要已能正常运行的 Homebrew；安装预编译二进制，不要求 Rust、Node.js、Apple Developer 账号或
+`sudo`。完整命令会在 Homebrew 6 中只信任目标 Formula，不会扩大为整个 Tap 的全局信任。
 
-安装器行为和本地端到端验证见 [macOS 安装与发行包](./docs/runbooks/installation.md)，正式发布配置见 [macOS 签名、公证与发布](./docs/runbooks/release.md)。
+Formula 按 CPU 架构下载 GitHub macOS CI 生成的 ad-hoc 签名二进制，并在安装前校验固定
+SHA-256。安装后的 `post_install` 注册 Chrome Native Host 并启动当前用户的 LaunchAgent；整个
+过程不使用 `sudo`。GitHub Release 同时发布构建来源证明，Chrome 固定扩展身份仍由同一发行门禁校验。
+
+安装、升级和卸载行为见 [Homebrew 安装](./docs/runbooks/installation.md)，正式发布配置见
+[Homebrew 与 GitHub Release 发布](./docs/runbooks/release.md)。
 
 Chrome 发行构建与 Core 发行包共用同一份扩展身份文件。正式 Item ID 与 public key 录入后，发行脚本会校验二者对应关系，并把同一个 ID 写入 Native Host allowlist：
 
@@ -52,23 +57,24 @@ Chrome 发行构建与 Core 发行包共用同一份扩展身份文件。正式 
   --output-dir target/distribution
 ```
 
-已安装用户通过当前发行包携带的受信任安装器升级：
+升级由 Homebrew 负责，升级后的 `post_install` 会让 daemon 切换到新 keg：
 
 ```bash
-aferry update
-aferry update --version <version>
+brew upgrade Wan-Kai/tap/agent-ferry
 ```
 
 默认卸载只移除 Agent Ferry 程序、后台服务和 Native Host，保留用户数据、日志与凭据：
 
 ```bash
 aferry uninstall
+brew uninstall Wan-Kai/tap/agent-ferry
 ```
 
 确认不再需要恢复配置、历史和远程 Hermes 连接时，才执行彻底清理：
 
 ```bash
 aferry uninstall --purge --yes
+brew uninstall Wan-Kai/tap/agent-ferry
 ```
 
 ## 用户数据目录
@@ -81,7 +87,8 @@ aferry uninstall --purge --yes
 aferry data migrate
 ```
 
-只有旧目录存在且新目录不存在时才会原子迁移；命令不会合并或覆盖两个已有目录。正式安装器将在启动新服务前执行这一迁移。
+只有旧目录存在且新目录不存在时才会原子迁移；命令不会合并或覆盖两个已有目录。Homebrew 不会
+静默迁移开发数据，具体停止服务和迁移顺序见安装 Runbook。
 
 ## macOS daemon
 

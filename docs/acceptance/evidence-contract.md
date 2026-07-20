@@ -11,7 +11,7 @@
 - Rust、Cargo、Node 与 npm 版本；
 - 实际执行的统一验证命令和结果；
 - Extension ZIP、CLI、daemon、Native Host 等被验收产物的 SHA256；
-- 正式 macOS 发布的 Developer ID Team、两个架构 Notary submission ID、无 issue log 与在线 Gatekeeper 结论；
+- 正式 macOS 发布的双架构 archive、Formula 与 Chrome ZIP SHA256、GitHub Artifact Attestation 和 Tap commit；
 - 真实环境 Case 的非敏感结果引用。
 
 普通开发可以在脏工作区运行验证，证据中的 `worktree_clean` 必须为 `false`，且不能作为 RC 证据。RC 证据必须通过 `--require-clean` 生成。提交之后若代码、锁文件、构建配置或产物改变，原证据不能沿用。

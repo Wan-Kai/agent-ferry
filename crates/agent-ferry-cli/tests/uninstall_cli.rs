@@ -248,3 +248,86 @@ fn uninstall_refuses_to_race_an_active_installation() {
     assert!(fixture.install_root.exists());
     assert!(fixture.data_root.exists());
 }
+
+#[test]
+fn homebrew_uninstall_cleans_runtime_without_deleting_the_keg() {
+    let home = PathBuf::from(format!(
+        "/tmp/af-homebrew-uninstall-{}",
+        Uuid::new_v4().simple()
+    ));
+    let keg_bin = home.join("homebrew/Cellar/agent-ferry/0.1.0/bin");
+    fs::create_dir_all(&keg_bin).expect("创建模拟 Homebrew keg");
+    let aferry = keg_bin.join("aferry");
+    fs::copy(env!("CARGO_BIN_EXE_aferry"), &aferry).expect("复制 aferry");
+    fs::set_permissions(&aferry, fs::Permissions::from_mode(0o755)).expect("设置 aferry 权限");
+    for binary in ["agentferryd", "agentferry-host"] {
+        let path = keg_bin.join(binary);
+        fs::write(&path, "test binary").expect("写入模拟 Homebrew 二进制");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("设置执行权限");
+    }
+    let launchctl = home.join("fake-launchctl");
+    fs::write(
+        &launchctl,
+        "#!/bin/sh\ncase \"$1\" in\nmanageruid) echo 501;;\nprint) [ -f \"$HOME/launchctl-loaded\" ] && { echo 'state = running'; echo 'pid = 9876'; } || exit 113;;\nbootstrap) : > \"$HOME/launchctl-loaded\";;\nbootout) rm -f \"$HOME/launchctl-loaded\";;\n*) exit 64;;\nesac\n",
+    )
+    .expect("写入 fake launchctl");
+    fs::set_permissions(&launchctl, fs::Permissions::from_mode(0o700))
+        .expect("设置 launchctl 权限");
+
+    let run = |arguments: &[&str]| {
+        Command::new(&aferry)
+            .env("HOME", &home)
+            .env("TMPDIR", home.join("tmp"))
+            .env("AGENT_FERRY_HOME", home.join(".agent-ferry"))
+            .env("AFERRY_LAUNCHCTL_PATH", &launchctl)
+            .args(arguments)
+            .output()
+            .expect("运行 Homebrew aferry")
+    };
+    let daemon = keg_bin.join("agentferryd");
+    let installed = run(&[
+        "service",
+        "install",
+        "--daemon-path",
+        daemon.to_str().expect("daemon 路径 UTF-8"),
+    ]);
+    assert!(installed.status.success());
+
+    let paths = AgentFerryPaths::from_root(home.join(".agent-ferry"));
+    let native_manifest = home.join(
+        "Library/Application Support/Google/Chrome/NativeMessagingHosts/com.agentferry.host.json",
+    );
+    fs::create_dir_all(native_manifest.parent().expect("manifest 父目录"))
+        .expect("创建 Native Host 目录");
+    fs::write(
+        &native_manifest,
+        serde_json::to_vec(&NativeHostManifest::new(
+            keg_bin.join("agentferry-host"),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ))
+        .expect("编码 manifest"),
+    )
+    .expect("写入 manifest");
+    fs::create_dir_all(&paths.root).expect("创建用户数据");
+
+    let output = run(&["uninstall", "--json"]);
+
+    assert!(
+        output.status.success(),
+        "Homebrew 清理失败: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(aferry.exists(), "aferry 必须继续由 Homebrew 管理");
+    assert!(daemon.exists(), "daemon 必须继续由 Homebrew 管理");
+    assert!(!native_manifest.exists());
+    assert!(
+        !home
+            .join("Library/LaunchAgents/com.agentferry.daemon.plist")
+            .exists()
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("\"program\": \"managed_externally\"")
+    );
+
+    fs::remove_dir_all(home).expect("清理模拟 Homebrew home");
+}

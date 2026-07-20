@@ -21,6 +21,7 @@ pub enum RemovalState {
     Removed,
     NotFound,
     PreservedForeign,
+    ManagedExternally,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -42,6 +43,36 @@ pub struct UninstallReport {
     pub logs: UserDataState,
 }
 
+struct ProgramInstallation {
+    self_managed: bool,
+    packaged_daemon: PathBuf,
+    packaged_host: PathBuf,
+}
+
+impl ProgramInstallation {
+    fn discover(install_root: &Path) -> Result<Self, UninstallError> {
+        let executable = fs::canonicalize(env::current_exe()?)?;
+        let packaged_bin = executable
+            .parent()
+            .ok_or(UninstallError::ExecutableParentUnavailable)?;
+        let self_managed = executable.starts_with(install_root)
+            || paths_refer_to_same_file(&executable, &install_root.join("current/bin/aferry"));
+        Ok(Self {
+            self_managed,
+            packaged_daemon: packaged_bin.join("agentferryd"),
+            packaged_host: packaged_bin.join("agentferry-host"),
+        })
+    }
+
+    fn packaged_daemon(&self) -> Option<&Path> {
+        (!self.self_managed).then_some(self.packaged_daemon.as_path())
+    }
+
+    fn packaged_host(&self) -> Option<&Path> {
+        (!self.self_managed).then_some(self.packaged_host.as_path())
+    }
+}
+
 pub fn run(purge: bool, yes: bool) -> Result<UninstallReport, UninstallError> {
     if purge && !yes {
         return Err(UninstallError::PurgeConfirmationRequired);
@@ -53,6 +84,7 @@ pub fn run(purge: bool, yes: bool) -> Result<UninstallReport, UninstallError> {
         .map(PathBuf::from)
         .ok_or(UninstallError::HomeDirectoryUnavailable)?;
     let install_root = home.join(".local/share/agent-ferry");
+    let installation = ProgramInstallation::discover(&install_root)?;
     let data_root = home.join(".agent-ferry");
     let log_root = home.join("Library/Logs/Agent Ferry");
     let artifact_root = env::temp_dir().join("agent-ferry/artifacts");
@@ -68,7 +100,8 @@ pub fn run(purge: bool, yes: bool) -> Result<UninstallReport, UninstallError> {
 
     let manager = ServiceManager::discover()?;
     let plist = home.join("Library/LaunchAgents/com.agentferry.daemon.plist");
-    let service_owned = service_is_owned(&plist, &install_root, &home)?;
+    let service_owned =
+        service_is_owned(&plist, &install_root, &home, installation.packaged_daemon())?;
     let service_was_loaded = if service_owned {
         let status = manager.status()?;
         let loaded = status.state != ServiceState::Stopped;
@@ -100,9 +133,22 @@ pub fn run(purge: bool, yes: bool) -> Result<UninstallReport, UninstallError> {
     } else {
         RemovalState::NotFound
     };
-    let native_host = remove_owned_native_host(&paths.native_host_manifest, &install_root, &home)?;
-    let commands_removed = remove_owned_command_links(&home, &install_root)?;
-    let program = remove_program_root(&install_root)?;
+    let native_host = remove_owned_native_host(
+        &paths.native_host_manifest,
+        &install_root,
+        &home,
+        installation.packaged_host(),
+    )?;
+    let commands_removed = if installation.self_managed {
+        remove_owned_command_links(&home, &install_root)?
+    } else {
+        0
+    };
+    let program = if installation.self_managed {
+        remove_program_root(&install_root)?
+    } else {
+        RemovalState::ManagedExternally
+    };
     let temporary_artifacts = remove_artifact_directory(&artifact_root)?;
 
     if purge {
@@ -171,6 +217,7 @@ fn service_is_owned(
     plist: &Path,
     install_root: &Path,
     home: &Path,
+    packaged_daemon: Option<&Path>,
 ) -> Result<bool, UninstallError> {
     let metadata = match fs::symlink_metadata(plist) {
         Ok(metadata) => metadata,
@@ -191,9 +238,12 @@ fn service_is_owned(
     let legacy = home
         .join("Library/Application Support/Agent Ferry/bin")
         .join("agentferryd");
+    let packaged_match =
+        packaged_daemon.is_some_and(|daemon| paths_refer_to_same_file(&program, daemon));
     Ok(
         (program.starts_with(install_root) && program.file_name() == Some("agentferryd".as_ref()))
-            || program == legacy,
+            || program == legacy
+            || packaged_match,
     )
 }
 
@@ -201,6 +251,7 @@ fn remove_owned_native_host(
     manifest_path: &Path,
     install_root: &Path,
     home: &Path,
+    packaged_host: Option<&Path>,
 ) -> Result<RemovalState, UninstallError> {
     let metadata = match fs::symlink_metadata(manifest_path) {
         Ok(metadata) => metadata,
@@ -221,12 +272,29 @@ fn remove_owned_native_host(
         .join("agentferry-host");
     let owned = manifest.name == agent_ferry_protocol::NATIVE_HOST_NAME
         && manifest.path.file_name() == Some("agentferry-host".as_ref())
-        && (manifest.path.starts_with(install_root) || manifest.path == legacy);
+        && (manifest.path.starts_with(install_root)
+            || manifest.path == legacy
+            || packaged_host.is_some_and(|host| paths_refer_to_same_file(&manifest.path, host)));
     if !owned {
         return Ok(RemovalState::PreservedForeign);
     }
     fs::remove_file(manifest_path)?;
     Ok(RemovalState::Removed)
+}
+
+/**
+ * Homebrew 的 `opt` 路径会在升级时切换到新的 Cellar，而当前进程已经解析到具体版本目录。
+ * 这里只比较两个已存在文件的 canonical path；任一路径失效时都按“不属于当前安装”处理，
+ * 避免卸载过程因为字符串前缀相似而删除其他软件注册的资源。
+ */
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+    let Ok(left) = fs::canonicalize(left) else {
+        return false;
+    };
+    let Ok(right) = fs::canonicalize(right) else {
+        return false;
+    };
+    left == right
 }
 
 fn remove_owned_command_links(home: &Path, install_root: &Path) -> Result<usize, UninstallError> {
@@ -325,6 +393,8 @@ pub enum UninstallError {
     YesWithoutPurge,
     #[error("无法确定用户目录")]
     HomeDirectoryUnavailable,
+    #[error("无法确定 aferry 所在的程序目录")]
+    ExecutableParentUnavailable,
     #[error("拒绝删除不是普通目录的路径：{0}")]
     UnsafeRemovalPath(PathBuf),
     #[error("另一个安装、更新或卸载正在执行，无法获取生命周期锁 {path}: {source}")]

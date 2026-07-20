@@ -104,3 +104,19 @@ fn update_rejects_a_group_writable_packaged_installer() {
 
     fs::remove_dir_all(home).expect("清理测试目录");
 }
+
+#[test]
+fn homebrew_install_redirects_updates_to_the_package_manager() {
+    let home = temporary_home();
+    let keg_bin = home.join("homebrew/Cellar/agent-ferry/0.1.0/bin");
+    fs::create_dir_all(&keg_bin).expect("创建模拟 Homebrew keg");
+    let aferry = keg_bin.join("aferry");
+    fs::copy(env!("CARGO_BIN_EXE_aferry"), &aferry).expect("复制 aferry");
+    fs::set_permissions(&aferry, fs::Permissions::from_mode(0o755)).expect("设置 aferry 权限");
+
+    let output = run(&aferry, &home, &["update"]);
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("brew upgrade"));
+    fs::remove_dir_all(home).expect("清理测试目录");
+}

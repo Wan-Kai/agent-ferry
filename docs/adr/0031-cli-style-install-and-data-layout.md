@@ -2,7 +2,8 @@
 
 ## 状态
 
-Accepted，2026-07-20。
+Superseded，2026-07-20。程序安装与发行渠道由 [ADR 0032](./0032-homebrew-distribution-without-developer-id.md)
+取代；用户数据、日志和系统规定目录的结论在新 ADR 中继续成立。
 
 ## 背景
 

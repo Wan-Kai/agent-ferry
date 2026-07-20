@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  printf '%s\n' '跳过 Homebrew macOS 发行包测试：当前不是 macOS。'
+  exit 0
+fi
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd "${script_dir}/.." && pwd)"
+temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-ferry-homebrew-test.XXXXXX")"
+trap 'rm -rf "${temporary_root}"' EXIT
+bin_dir="${temporary_root}/bin"
+release_dir="${temporary_root}/release"
+mkdir -p "${bin_dir}" "${release_dir}"
+
+cargo build --locked \
+  -p agent-ferry-cli -p agent-ferry-daemon -p agent-ferry-host >/dev/null
+for binary in aferry agentferryd agentferry-host; do
+  cp "${repository_root}/target/debug/${binary}" "${bin_dir}/${binary}"
+done
+
+"${script_dir}/package-homebrew-release" \
+  --version 0.1.0 \
+  --arm64-bin-dir "${bin_dir}" \
+  --x86_64-bin-dir "${bin_dir}" \
+  --output-dir "${release_dir}" \
+  --base-url "file://${release_dir}" \
+  --extension-identity "${repository_root}/release/chrome-extension-identity.json" >/dev/null
+
+formula="${release_dir}/agent-ferry.rb"
+/usr/bin/ruby -c "${formula}" | grep -q 'Syntax OK'
+if grep -q '__AGENT_FERRY_' "${formula}"; then
+  printf '%s\n' 'Homebrew Formula 仍包含未渲染占位符。' >&2
+  exit 1
+fi
+grep -q 'ommpdijpcidnicpbalkpnggoljhapcel' "${formula}"
+grep -q 'AGENT_FERRY_SKIP_ACTIVATION' "${formula}"
+grep -q 'ManagedExternally\|brew uninstall' \
+  "${repository_root}/crates/agent-ferry-cli/src/uninstall.rs" \
+  "${formula}"
+
+for architecture in arm64 x86_64; do
+  archive="${release_dir}/agent-ferry-v0.1.0-darwin-${architecture}.tar.gz"
+  expected="$(awk -v name="$(basename "${archive}")" '$2 == name { print $1 }' "${release_dir}/checksums.txt")"
+  actual="$(/usr/bin/shasum -a 256 "${archive}" | awk '{print $1}')"
+  [[ "${expected}" == "${actual}" ]]
+  /usr/bin/tar -tzf "${archive}" | grep -q 'bin/aferry$'
+done
+
+printf '%s\n' 'Homebrew Formula、双架构归档、ad-hoc 签名与 SHA256 契约测试通过'

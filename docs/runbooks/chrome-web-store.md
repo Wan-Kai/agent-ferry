@@ -20,7 +20,8 @@ Agent Ferry 的单一用途是：**把用户当前查看的网页内容和可见
 4. 运行 `scripts/extension-identity.mjs` 验证 public key 推导出的 ID 与 Item ID 一致；
 5. 使用 `scripts/package-chrome-extension` 生成正式 ZIP。
 
-正式 ZIP 的 manifest `key`、Core `release-manifest.json` 的 `extension_id` 和 Native Host `allowed_origins` 必须完全一致。普通用户不需要查找或输入扩展 ID。
+正式 ZIP 的 manifest `key`、Homebrew Formula 的 extension ID 和 Native Host `allowed_origins`
+必须完全一致。普通用户不需要查找或输入扩展 ID。
 
 ## 商店文案
 

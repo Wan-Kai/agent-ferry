@@ -11,4 +11,4 @@
 ## 当前补充决策
 
 - [ADR 0030：保存有界的本地任务历史](./0030-bounded-local-task-history.md)，取代 ADR 0028、0029 中禁止 Ferry 历史的部分。
-- [ADR 0031：采用 CLI 风格的安装与数据目录](./0031-cli-style-install-and-data-layout.md)。
+- [ADR 0032：使用 Homebrew 分发未公证的轻量 Core](./0032-homebrew-distribution-without-developer-id.md)，取代 ADR 0031 的程序安装与发行渠道。

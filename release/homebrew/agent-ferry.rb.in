@@ -1,0 +1,48 @@
+class AgentFerry < Formula
+  desc "Browser-to-agent handoff for local and remote AI coding agents"
+  homepage "https://github.com/Wan-Kai/agent-ferry"
+  version "__AGENT_FERRY_VERSION__"
+
+  on_arm do
+    url "__AGENT_FERRY_ARM64_URL__"
+    sha256 "__AGENT_FERRY_ARM64_SHA256__"
+  end
+
+  on_intel do
+    url "__AGENT_FERRY_X86_64_URL__"
+    sha256 "__AGENT_FERRY_X86_64_SHA256__"
+  end
+
+  depends_on macos: :big_sur
+
+  def install
+    bin.install "bin/aferry", "bin/agentferryd", "bin/agentferry-host"
+  end
+
+  def post_install
+    return if ENV["AGENT_FERRY_SKIP_ACTIVATION"] == "1"
+
+    system opt_bin/"aferry", "service", "install",
+           "--daemon-path", opt_bin/"agentferryd"
+    system opt_bin/"aferry", "native-host", "register",
+           "--extension-id", "__AGENT_FERRY_EXTENSION_ID__",
+           "--host-path", opt_bin/"agentferry-host"
+  end
+
+  def caveats
+    <<~EOS
+      Agent Ferry 已安装并启动当前用户的后台服务，同时注册 Chrome Native Host。
+
+      卸载前先清理运行资源和 Native Host，再让 Homebrew 删除程序：
+        aferry uninstall
+        brew uninstall Wan-Kai/tap/agent-ferry
+
+      默认保留 ~/.agent-ferry 中的配置和历史。彻底清理时先执行：
+        aferry uninstall --purge --yes
+    EOS
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/aferry --version")
+  end
+end

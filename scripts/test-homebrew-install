@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  printf '%s\n' '跳过真实 Homebrew 安装验收：当前不是 macOS。'
+  exit 0
+fi
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd "${script_dir}/.." && pwd)"
+brew_bin="${AGENT_FERRY_BREW_BIN:-/opt/homebrew/bin/brew}"
+if [[ ! -x "${brew_bin}" ]]; then
+  brew_bin="/usr/local/bin/brew"
+fi
+if [[ ! -x "${brew_bin}" ]]; then
+  printf '%s\n' '未找到 Homebrew，无法执行真实安装验收。' >&2
+  exit 1
+fi
+if "${brew_bin}" list --versions agent-ferry >/dev/null 2>&1; then
+  printf '%s\n' '真实 Homebrew 验收要求 agent-ferry 尚未安装，避免覆盖用户现有 keg。' >&2
+  exit 1
+fi
+
+temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-ferry-homebrew-e2e.XXXXXX")"
+test_home="${temporary_root}/home with spaces"
+release_dir="${temporary_root}/release"
+bin_dir="${temporary_root}/bin"
+launchctl="${temporary_root}/fake-launchctl"
+mkdir -p "${test_home}" "${release_dir}" "${bin_dir}" "${test_home}/tmp"
+installed="false"
+tap_name="agent-ferry/e2e"
+tap_created="false"
+
+cleanup() {
+  if [[ "${installed}" == "true" ]]; then
+    HOME="${test_home}" \
+      TMPDIR="${test_home}/tmp" \
+      AGENT_FERRY_HOME="${test_home}/.agent-ferry" \
+      AFERRY_LAUNCHCTL_PATH="${launchctl}" \
+      "$("${brew_bin}" --prefix agent-ferry)/bin/aferry" uninstall >/dev/null 2>&1 || true
+    HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" uninstall --force agent-ferry >/dev/null 2>&1 || true
+  fi
+  if [[ "${tap_created}" == "true" ]]; then
+    HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" untap --force "${tap_name}" >/dev/null 2>&1 || true
+  fi
+  rm -rf "${temporary_root}"
+}
+trap cleanup EXIT
+
+printf '%s\n' \
+  '#!/bin/sh' \
+  'printf "%s\n" "$*" >> "$HOME/launchctl-arguments.log"' \
+  'case "$1" in' \
+  '  manageruid) printf "%s\n" 501 ;;' \
+  '  print)' \
+  '    if [ -f "$HOME/launchctl-loaded" ]; then' \
+  '      printf "%s\n" "state = running" "pid = 2468"' \
+  '    else' \
+  '      exit 113' \
+  '    fi' \
+  '    ;;' \
+  '  bootstrap) : > "$HOME/launchctl-loaded" ;;' \
+  '  bootout) rm -f "$HOME/launchctl-loaded" ;;' \
+  '  *) exit 64 ;;' \
+  'esac' >"${launchctl}"
+chmod 700 "${launchctl}"
+
+cargo build --locked \
+  -p agent-ferry-cli -p agent-ferry-daemon -p agent-ferry-host >/dev/null
+for binary in aferry agentferryd agentferry-host; do
+  cp "${repository_root}/target/debug/${binary}" "${bin_dir}/${binary}"
+done
+"${script_dir}/package-homebrew-release" \
+  --version 0.1.0 \
+  --arm64-bin-dir "${bin_dir}" \
+  --x86_64-bin-dir "${bin_dir}" \
+  --output-dir "${release_dir}" \
+  --base-url "file://${release_dir}" \
+  --extension-identity "${repository_root}/release/chrome-extension-identity.json" >/dev/null
+
+HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" tap-new "${tap_name}" >/dev/null
+tap_created="true"
+tap_root="$("${brew_bin}" --repo "${tap_name}")"
+mkdir -p "${tap_root}/Formula"
+cp "${release_dir}/agent-ferry.rb" "${tap_root}/Formula/agent-ferry.rb"
+
+HOME="${test_home}" \
+  TMPDIR="${test_home}/tmp" \
+  AGENT_FERRY_HOME="${test_home}/.agent-ferry" \
+  AFERRY_LAUNCHCTL_PATH="${launchctl}" \
+  HOMEBREW_NO_AUTO_UPDATE=1 \
+  "${brew_bin}" install "${tap_name}/agent-ferry"
+installed="true"
+
+prefix="$("${brew_bin}" --prefix agent-ferry)"
+aferry="${prefix}/bin/aferry"
+[[ "$("${aferry}" --version)" == 'aferry 0.1.0' ]]
+HOME="${test_home}" \
+  AGENT_FERRY_HOME="${test_home}/.agent-ferry" \
+  AFERRY_LAUNCHCTL_PATH="${launchctl}" \
+  "${aferry}" service status --json | grep -q '"state": "running"'
+
+manifest="${test_home}/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.agentferry.host.json"
+[[ -f "${manifest}" ]]
+/usr/bin/plutil -extract allowed_origins.0 raw -o - "${manifest}" |
+  grep -q '^chrome-extension://ommpdijpcidnicpbalkpnggoljhapcel/$'
+/usr/bin/plutil -extract path raw -o - "${manifest}" | grep -q '/opt/agent-ferry/bin/agentferry-host$'
+
+log_dir="${test_home}/Library/Logs/Agent Ferry"
+mkdir -p "${log_dir}"
+printf '%s\n' 'homebrew-e2e-log' >"${log_dir}/agentferryd.log"
+HOME="${test_home}" \
+  AGENT_FERRY_HOME="${test_home}/.agent-ferry" \
+  AFERRY_LAUNCHCTL_PATH="${launchctl}" \
+  "${aferry}" service logs --lines 10 | grep -q 'homebrew-e2e-log'
+
+uninstall_report="${temporary_root}/uninstall.json"
+HOME="${test_home}" \
+  TMPDIR="${test_home}/tmp" \
+  AGENT_FERRY_HOME="${test_home}/.agent-ferry" \
+  AFERRY_LAUNCHCTL_PATH="${launchctl}" \
+  "${aferry}" uninstall --json >"${uninstall_report}"
+grep -q '"program": "managed_externally"' "${uninstall_report}"
+[[ -x "${aferry}" ]]
+[[ ! -e "${manifest}" ]]
+[[ ! -e "${test_home}/Library/LaunchAgents/com.agentferry.daemon.plist" ]]
+
+HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" uninstall "${tap_name}/agent-ferry" >/dev/null
+installed="false"
+if "${brew_bin}" list --versions agent-ferry >/dev/null 2>&1; then
+  printf '%s\n' 'Homebrew 卸载后仍能找到 agent-ferry keg。' >&2
+  exit 1
+fi
+HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" untap --force "${tap_name}" >/dev/null
+tap_created="false"
+printf '真实 Homebrew 安装、激活、状态、日志和双阶段卸载通过；测试根目录：%s\n' "${temporary_root}"

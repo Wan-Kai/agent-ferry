@@ -4,7 +4,7 @@ import "./style.css";
 
 const NATIVE_HOST_NAME = "com.agentferry.host";
 const PROTOCOL_VERSION = 1;
-const INSTALL_COMMAND = "curl -fsSL https://github.com/Wan-Kai/agent-ferry/releases/latest/download/install.sh | bash";
+const INSTALL_COMMAND = "brew install Wan-Kai/tap/agent-ferry";
 const PRIVACY_URL = "https://github.com/Wan-Kai/agent-ferry/blob/main/PRIVACY.md";
 const SUPPORT_URL = "https://github.com/Wan-Kai/agent-ferry/issues";
 
@@ -77,7 +77,7 @@ function App() {
       <div className="step-number">1</div>
       <div className="step-content">
         <h2>安装轻量 Core</h2>
-        <p>在 macOS Terminal 中执行。无需 sudo、Rust 或 Node.js，也不会替你安装 Claude Code、Codex 或 OpenCode。</p>
+        <p>在已经安装 Homebrew 的 macOS Terminal 中执行。无需 sudo、Rust 或 Node.js，也不会替你安装 Claude Code、Codex 或 OpenCode。</p>
         <div className="command-row">
           <code>{INSTALL_COMMAND}</code>
           <button type="button" onClick={() => void copyCommand()}>{copied ? "已复制" : "复制"}</button>
@@ -89,7 +89,7 @@ function App() {
       <div className="step-number">2</div>
       <div className="step-content">
         <h2>确认连接</h2>
-        <p>安装器会注册 Native Host、启动 agentferryd，并检查服务状态。完成后回到这里重新检查。</p>
+        <p>Homebrew 安装完成后会注册 Native Host 并启动 agentferryd。完成后回到这里重新检查。</p>
         <button className="check-button" type="button" disabled={connection.kind === "checking"} onClick={() => void checkConnection()}>{connection.kind === "checking" ? "正在检查…" : "重新检查"}</button>
       </div>
     </section>

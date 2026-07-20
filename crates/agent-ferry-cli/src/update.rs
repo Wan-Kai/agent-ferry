@@ -49,11 +49,18 @@ fn packaged_installer() -> Result<PathBuf, UpdateError> {
 }
 
 fn validate_installer(installer: &Path) -> Result<(), UpdateError> {
-    let metadata =
-        fs::symlink_metadata(installer).map_err(|source| UpdateError::InstallerUnavailable {
-            path: installer.to_path_buf(),
-            source,
-        })?;
+    let metadata = match fs::symlink_metadata(installer) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(UpdateError::ManagedByPackageManager);
+        }
+        Err(source) => {
+            return Err(UpdateError::InstallerUnavailable {
+                path: installer.to_path_buf(),
+                source,
+            });
+        }
+    };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(UpdateError::UnsafeInstallerType(installer.to_path_buf()));
     }
@@ -125,6 +132,8 @@ pub enum UpdateError {
     HomeDirectoryUnavailable,
     #[error("当前 aferry 不在完整的版本化安装布局中，无法找到受信任安装器")]
     InstallLayoutUnavailable,
+    #[error("当前 Agent Ferry 由 Homebrew 管理；请执行 brew upgrade Wan-Kai/tap/agent-ferry")]
+    ManagedByPackageManager,
     #[error("无法读取受信任安装器 {path}: {source}")]
     InstallerUnavailable {
         path: PathBuf,

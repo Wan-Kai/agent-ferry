@@ -54,13 +54,11 @@ fi
 "${node_bin}" "${script_dir}/check-store-readiness.mjs"
 "${node_bin}" "${script_dir}/test-extension-identity.mjs"
 "${script_dir}/test-extension-release"
-"${script_dir}/test-release-environment"
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 if [[ "$(uname -s)" == "Darwin" ]]; then
-  "${script_dir}/test-macos-installer"
-  "${script_dir}/test-release-pipeline"
+  "${script_dir}/test-homebrew-release"
 fi
 "${npm_bin}" --prefix extension test
 "${npm_bin}" --prefix extension run compile
