@@ -12,6 +12,8 @@ use agent_ferry_core::AgentFerryPaths;
 use serde::{Deserialize, Serialize};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const EXECUTABLE_BUSY_RETRIES: usize = 4;
+const EXECUTABLE_BUSY_OS_ERROR: i32 = 26;
 pub const MAX_CLAUDE_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
 const ARTIFACT_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -329,22 +331,24 @@ fn execute_print_process(
     task_prompt: &str,
     emit: &mut impl FnMut(ClaudeTaskEvent),
 ) -> Result<String, ClaudeError> {
-    let mut child = Command::new(executable)
-        .current_dir(workspace)
-        .args([
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            "--dangerously-skip-permissions",
-            "--session-id",
-            session_id,
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut child = spawn_with_busy_retry(|| {
+        Command::new(executable)
+            .current_dir(workspace)
+            .args([
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+                "--dangerously-skip-permissions",
+                "--session-id",
+                session_id,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    })?;
     child
         .stdin
         .take()
@@ -499,12 +503,14 @@ fn validate_absolute_executable(path: &Path) -> Result<PathBuf, ClaudeError> {
 }
 
 fn run_with_timeout(executable: &Path, arguments: &[&str]) -> Result<Output, ClaudeError> {
-    let mut child = Command::new(executable)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut child = spawn_with_busy_retry(|| {
+        Command::new(executable)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    })?;
     let deadline = Instant::now() + COMMAND_TIMEOUT;
     loop {
         if child.try_wait()?.is_some() {
@@ -517,6 +523,27 @@ fn run_with_timeout(executable: &Path, arguments: &[&str]) -> Result<Output, Cla
         }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/**
+ * CLI 刚被 Homebrew 或宿主安装器原子替换时，Linux 和 macOS 都可能短暂返回 ETXTBSY。
+ * 只重试这个明确的内核错误，避免把路径、权限或格式错误伪装成可恢复故障。
+ */
+fn spawn_with_busy_retry(
+    mut spawn: impl FnMut() -> std::io::Result<std::process::Child>,
+) -> std::io::Result<std::process::Child> {
+    for attempt in 0..=EXECUTABLE_BUSY_RETRIES {
+        match spawn() {
+            Err(error)
+                if error.raw_os_error() == Some(EXECUTABLE_BUSY_OS_ERROR)
+                    && attempt < EXECUTABLE_BUSY_RETRIES =>
+            {
+                thread::sleep(Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+    unreachable!("有限重试循环总会在最后一次返回")
 }
 
 fn diagnosis(
