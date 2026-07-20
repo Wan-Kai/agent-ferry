@@ -119,7 +119,7 @@ jobs:
         if: github.ref_type == 'tag'
         with:
           repository: Wan-Kai/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
           path: target/homebrew-tap
       - name: Publish Formula to Homebrew tap
         if: github.ref_type == 'tag'

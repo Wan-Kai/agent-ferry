@@ -15,15 +15,17 @@
 
 ## GitHub 配置
 
-创建公开仓库 `Wan-Kai/homebrew-tap`，默认分支为 `main`，至少包含 `Formula/` 目录。为主仓库
-Release workflow 创建 fine-grained token：
+创建公开仓库 `Wan-Kai/homebrew-tap`，默认分支为 `main`。为它创建一对不带口令的独立
+Ed25519 Deploy Key；这对密钥不能与个人 SSH 登录密钥或其他项目复用：
 
-- Repository access：只选择 `Wan-Kai/homebrew-tap`；
-- Repository permissions → Contents：Read and write；
-- 保存为主仓库 Actions Secret `HOMEBREW_TAP_TOKEN`。
+- 在 Tap 的 Settings → Deploy keys 中添加公钥，并仅为这枚 key 勾选 Allow write access；
+- 在主仓库 Settings → Secrets and variables → Actions 中把私钥保存为
+  `HOMEBREW_TAP_DEPLOY_KEY`；
+- 私钥只保存在 GitHub Actions Secret 和创建时的受限临时文件，配置完成后删除临时文件。
 
-该 token 只用于把生成的 `agent-ferry.rb` 提交到 Tap，不读取 Apple、Chrome 或 Hermes 凭据。
-Release workflow 的 `GITHUB_TOKEN` 只负责当前仓库 Release 和 Artifact Attestation。
+Deploy Key 只能写 `Wan-Kai/homebrew-tap`，不能访问账号中的其他仓库。Release workflow 的
+`GITHUB_TOKEN` 只负责当前仓库 Release 和 Artifact Attestation；流水线不使用个人 PAT，也不读取
+Apple、Chrome 或 Hermes 凭据。
 
 ## 构建与完整性
 

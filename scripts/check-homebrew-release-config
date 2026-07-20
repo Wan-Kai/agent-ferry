@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd "${script_dir}/.." && pwd)"
+workflow="${repository_root}/.github/workflows/release.yml"
+runbook="${repository_root}/docs/runbooks/release.md"
+
+grep -q 'repository: Wan-Kai/homebrew-tap' "${workflow}"
+grep -q 'ssh-key: \${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}' "${workflow}"
+grep -q 'HOMEBREW_TAP_DEPLOY_KEY' "${runbook}"
+
+if grep -Eq 'HOMEBREW_TAP_TOKEN|APPLE_(SIGNING|TEAM|NOTARY|DEVELOPER)' "${workflow}"; then
+  printf '%s\n' 'Homebrew 发布 workflow 重新引入了个人 token 或 Apple 发布凭据。' >&2
+  exit 1
+fi
+
+printf '%s\n' 'Homebrew Tap 最小权限发布配置检查通过'
