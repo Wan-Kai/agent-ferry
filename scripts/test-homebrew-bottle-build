@@ -48,7 +48,7 @@ bottle="${output_dir}/agent-ferry-0.1.2.arm64_sonoma.bottle.tar.gz"
 [[ ! -e "${output_dir}/agent-ferry--0.1.2.arm64_sonoma.bottle.tar.gz" ]]
 tar -tzf "${bottle}" | grep -q '^agent-ferry/0.1.2/.brew/agent-ferry.rb$'
 tar -tzf "${bottle}" | grep -q '^agent-ferry/0.1.2/bin/agentferryd$'
-grep -q '^install --build-bottle --skip-post-install agent-ferry/bottle/agent-ferry$' "${brew_log}"
+grep -q '^install --build-bottle agent-ferry/bottle/agent-ferry$' "${brew_log}"
 grep -q '^bottle --skip-relocation --force-core-tap --no-rebuild agent-ferry/bottle/agent-ferry$' "${brew_log}"
 
 printf '%s\n' 'Homebrew Bottle 构建命令与归档结构契约测试通过'
