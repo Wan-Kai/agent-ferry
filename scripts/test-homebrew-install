@@ -162,7 +162,9 @@ manifest="${test_home}/Library/Application Support/Google/Chrome/NativeMessaging
 [[ -f "${manifest}" ]]
 plutil -extract allowed_origins.0 raw -o - "${manifest}" |
   grep -q "^chrome-extension://${extension_id}/$"
-plutil -extract path raw -o - "${manifest}" | grep -q '/opt/agent-ferry/bin/agentferry-host$'
+expected_host_dir="$(cd "$(dirname "${prefix}/bin/agentferry-host")" && pwd -P)"
+expected_host_path="${expected_host_dir}/agentferry-host"
+[[ "$(plutil -extract path raw -o - "${manifest}")" == "${expected_host_path}" ]]
 
 log_dir="${test_home}/Library/Logs/Agent Ferry"
 mkdir -p "${log_dir}"
