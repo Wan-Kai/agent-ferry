@@ -137,7 +137,7 @@ HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" fetch \
 HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" install \
   --skip-post-install "${tap_name}/agent-ferry" 2>&1 | tee "${install_log}"
 installed="true"
-grep -q "Pouring agent-ferry--${version}.${expected_tag}.bottle.tar.gz" "${install_log}"
+grep -q "Pouring agent-ferry-${version}.${expected_tag}.bottle.tar.gz" "${install_log}"
 
 prefix="$("${brew_bin}" --prefix agent-ferry)"
 aferry="${prefix}/bin/aferry"
