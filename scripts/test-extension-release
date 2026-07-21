@@ -13,7 +13,7 @@ printf '%s\n' '{"schema_version":1,"extension_id":"bmbgkcbcohmlbiaigfoilnaobdoon
   --extension-identity "${identity}" \
   --output-dir "${temporary_root}/release" >/dev/null
 
-archive="${temporary_root}/release/agent-ferry-extension-v0.1.3-chrome.zip"
+archive="${temporary_root}/release/agent-ferry-extension-v0.1.4-chrome.zip"
 [[ -f "${archive}" ]]
 [[ -f "${archive}.sha256" ]]
 /usr/bin/unzip -p "${archive}" manifest.json >"${temporary_root}/manifest.json"
@@ -46,20 +46,20 @@ if (JSON.stringify(manifest.action?.default_icon) !== JSON.stringify(expectedIco
 }
 ' "${temporary_root}/manifest.json"
 for size in 16 32 48 128; do
-  /usr/bin/unzip -l "${archive}" | grep -q " icons/icon-${size}.png$"
+  /usr/bin/unzip -l "${archive}" | grep " icons/icon-${size}.png$" >/dev/null
 done
 /usr/bin/unzip -p "${archive}" 'chunks/popup-*.js' >"${temporary_root}/popup.js"
 grep -q '页面正文只会在你点击开始后提取和发送' "${temporary_root}/popup.js"
 grep -q '点击后将提取当前页正文和上方任务指令' "${temporary_root}/popup.js"
-/usr/bin/unzip -l "${archive}" | grep -q ' onboarding.html$'
+/usr/bin/unzip -l "${archive}" | grep ' onboarding.html$' >/dev/null
 /usr/bin/unzip -p "${archive}" 'chunks/onboarding-*.js' >"${temporary_root}/onboarding.js"
 grep -q 'brew install Wan-Kai/tap/agent-ferry' "${temporary_root}/onboarding.js"
 grep -q 'aferry activate' "${temporary_root}/onboarding.js"
 grep -q 'PRIVACY.md' "${temporary_root}/onboarding.js"
 /usr/bin/unzip -p "${archive}" background.js >"${temporary_root}/background.js"
 grep -q 'onboarding.html' "${temporary_root}/background.js"
-/usr/bin/unzip -l "${archive}" | grep -q ' extract-page.js$'
-if /usr/bin/unzip -l "${archive}" | grep -q 'content-scripts/extract-page.js$'; then
+/usr/bin/unzip -l "${archive}" | grep ' extract-page.js$' >/dev/null
+if /usr/bin/unzip -l "${archive}" | grep 'content-scripts/extract-page.js$' >/dev/null; then
   printf '%s\n' '页面提取器仍被打包为需要 host permission 的 content script。' >&2
   exit 1
 fi

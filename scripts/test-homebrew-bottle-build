@@ -22,11 +22,11 @@ printf '%s\n' \
   '  install) ;;' \
   '  bottle)' \
   '    root="$(mktemp -d "${TMPDIR:-/tmp}/fake-bottle.XXXXXX")"' \
-  '    mkdir -p "$root/agent-ferry/0.1.3/.brew" "$root/agent-ferry/0.1.3/bin"' \
-  '    printf "%s\n" "class AgentFerry < Formula" "end" > "$root/agent-ferry/0.1.3/.brew/agent-ferry.rb"' \
-  '    printf "%s\n" "{}" > "$root/agent-ferry/0.1.3/INSTALL_RECEIPT.json"' \
-  '    for binary in aferry agentferryd agentferry-host; do printf "%s\n" "binary" > "$root/agent-ferry/0.1.3/bin/$binary"; done' \
-  '    tar -czf "$PWD/agent-ferry--0.1.3.arm64_sonoma.bottle.tar.gz" -C "$root" agent-ferry' \
+  '    mkdir -p "$root/agent-ferry/0.1.4/.brew" "$root/agent-ferry/0.1.4/bin"' \
+  '    printf "%s\n" "class AgentFerry < Formula" "end" > "$root/agent-ferry/0.1.4/.brew/agent-ferry.rb"' \
+  '    printf "%s\n" "{}" > "$root/agent-ferry/0.1.4/INSTALL_RECEIPT.json"' \
+  '    for binary in aferry agentferryd agentferry-host; do printf "%s\n" "binary" > "$root/agent-ferry/0.1.4/bin/$binary"; done' \
+  '    tar -czf "$PWD/agent-ferry--0.1.4.arm64_sonoma.bottle.tar.gz" -C "$root" agent-ferry' \
   '    rm -rf "$root"' \
   '    ;;' \
   '  uninstall|untap) ;;' \
@@ -38,16 +38,16 @@ AGENT_FERRY_BREW_BIN="${fake_brew}" \
 AGENT_FERRY_BREW_TEST_LOG="${brew_log}" \
 AGENT_FERRY_BREW_TEST_TAP="${fake_tap}" \
   "${script_dir}/build-homebrew-bottle" \
-    --version 0.1.3 \
+    --version 0.1.4 \
     --formula "${formula}" \
     --output-dir "${output_dir}" \
     --expected-tag arm64_sonoma >/dev/null
 
-bottle="${output_dir}/agent-ferry-0.1.3.arm64_sonoma.bottle.tar.gz"
+bottle="${output_dir}/agent-ferry-0.1.4.arm64_sonoma.bottle.tar.gz"
 [[ -f "${bottle}" ]]
-[[ ! -e "${output_dir}/agent-ferry--0.1.3.arm64_sonoma.bottle.tar.gz" ]]
-tar -tzf "${bottle}" | grep -q '^agent-ferry/0.1.3/.brew/agent-ferry.rb$'
-tar -tzf "${bottle}" | grep -q '^agent-ferry/0.1.3/bin/agentferryd$'
+[[ ! -e "${output_dir}/agent-ferry--0.1.4.arm64_sonoma.bottle.tar.gz" ]]
+tar -tzf "${bottle}" | grep -q '^agent-ferry/0.1.4/.brew/agent-ferry.rb$'
+tar -tzf "${bottle}" | grep -q '^agent-ferry/0.1.4/bin/agentferryd$'
 grep -q '^install --build-bottle agent-ferry/bottle/agent-ferry$' "${brew_log}"
 grep -q '^bottle --skip-relocation --force-core-tap --no-rebuild agent-ferry/bottle/agent-ferry$' "${brew_log}"
 

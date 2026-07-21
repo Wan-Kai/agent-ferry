@@ -44,16 +44,32 @@ function CheckIcon() {
   return <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10.2 3.7 3.7L16 5.7" /></svg>;
 }
 
+function LockIcon() {
+  return <svg viewBox="0 0 20 20" aria-hidden="true">
+    <path d="M6.25 8V6.25a3.75 3.75 0 0 1 7.5 0V8" />
+    <rect x="4.5" y="8" width="11" height="8.25" rx="2.25" />
+    <path d="M10 11.25v2" />
+  </svg>;
+}
+
+function PagePacketIcon() {
+  return <svg viewBox="0 0 24 18" aria-hidden="true">
+    <path d="M7.25 5.25h9.5M7.25 8.75h7.5M7.25 12.25h5.25" />
+  </svg>;
+}
+
 function RouteMap({ connection }: { connection: ConnectionState }) {
   return <div className={`route-map route-${connection.kind}`} aria-hidden="true">
     <div className="route-source">
-      <div className="browser-bar"><i /><i /><i /></div>
-      <div className="page-lines"><b /><span /><span /><span /></div>
+      <div className="route-source-frame">
+        <div className="browser-bar"><i /><i /><i /></div>
+        <div className="page-lines"><b /><span /><span /><span /></div>
+      </div>
       <small>当前网页</small>
     </div>
 
     <div className="route-track route-track-in">
-      <span className="route-packet"><i /></span>
+      <span className="route-packet"><PagePacketIcon /></span>
     </div>
 
     <div className="route-core">
@@ -130,14 +146,14 @@ function App() {
       <section className="intro-panel">
         <div className="intro-copy">
           <p className="eyebrow">YOUR PAGE, IN THEIR CONTEXT</p>
-          <h1>从这一页，<br />驶向你的 Agent。</h1>
+          <h1><span>从这一页，</span><span>驶向你的 <b>Agent。</b></span></h1>
           <p className="lead">把正在阅读的论文、帖子或文档，连同你的任务指令，直接交给本地 Agent 或远端 Hermes。</p>
         </div>
 
         <RouteMap connection={connection} />
 
         <div className="privacy-note">
-          <span className="privacy-mark"><i /></span>
+          <span className="privacy-mark"><LockIcon /></span>
           <p><strong>点击发送之前，我们不会读取网页正文。</strong><br />内容只前往你选择的 Agent，不经过 Agent Ferry 云端。</p>
         </div>
       </section>
