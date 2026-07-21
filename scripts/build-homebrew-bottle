@@ -82,11 +82,17 @@ installed="true"
     --skip-relocation --force-core-tap --no-rebuild "${tap_name}/agent-ferry"
 )
 
-bottle="${output_dir}/agent-ferry--${version}.${expected_tag}.bottle.tar.gz"
-if [[ ! -f "${bottle}" ]]; then
-  printf 'Homebrew 没有生成预期 Bottle：%s\n' "${bottle}" >&2
+local_bottle="${output_dir}/agent-ferry--${version}.${expected_tag}.bottle.tar.gz"
+published_bottle="${output_dir}/agent-ferry-${version}.${expected_tag}.bottle.tar.gz"
+if [[ ! -f "${local_bottle}" ]]; then
+  printf 'Homebrew 没有生成预期 Bottle：%s\n' "${local_bottle}" >&2
   exit 1
 fi
+
+# Homebrew 在本地生成的文件名使用双连字符，但通用 root_url 会请求 URL 编码后的单连字符名称。
+# 发布前必须显式转换，否则 Formula 校验值正确也会在下载阶段得到 404。
+mv "${local_bottle}" "${published_bottle}"
+bottle="${published_bottle}"
 archive_listing="${output_dir}/.agent-ferry-bottle-files"
 /usr/bin/tar -tzf "${bottle}" >"${archive_listing}"
 for required in \

@@ -52,8 +52,8 @@ fi
 
 arm64_source="agent-ferry-v${version}-darwin-arm64.tar.gz"
 x86_source="agent-ferry-v${version}-darwin-x86_64.tar.gz"
-arm64_bottle="agent-ferry--${version}.arm64_sonoma.bottle.tar.gz"
-x86_bottle="agent-ferry--${version}.sequoia.bottle.tar.gz"
+arm64_bottle="agent-ferry-${version}.arm64_sonoma.bottle.tar.gz"
+x86_bottle="agent-ferry-${version}.sequoia.bottle.tar.gz"
 for artifact in "${arm64_source}" "${x86_source}" "${arm64_bottle}" "${x86_bottle}"; do
   if [[ ! -f "${distribution_dir}/${artifact}" ]]; then
     printf '缺少 Homebrew 发行产物：%s\n' "${distribution_dir}/${artifact}" >&2

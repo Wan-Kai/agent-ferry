@@ -13,6 +13,8 @@ grep -q 'macos-15-intel' "${workflow}"
 grep -q './scripts/build-homebrew-bottle' "${workflow}"
 grep -q -- '--force-bottle' "${repository_root}/scripts/test-homebrew-install"
 grep -q -- '--artifact target/release-evidence/homebrew-e2e.log' "${workflow}"
+grep -q 'if ! ./scripts/test-homebrew-install' "${workflow}"
+grep -q "grep -q '真实 Homebrew Bottle 下载、安装、激活、状态、日志和双阶段卸载通过'" "${workflow}"
 grep -q 'HOMEBREW_TAP_DEPLOY_KEY' "${runbook}"
 
 if grep -Eq 'HOMEBREW_TAP_TOKEN|APPLE_(SIGNING|TEAM|NOTARY|DEVELOPER)' "${workflow}"; then

@@ -43,8 +43,9 @@ AGENT_FERRY_BREW_TEST_TAP="${fake_tap}" \
     --output-dir "${output_dir}" \
     --expected-tag arm64_sonoma >/dev/null
 
-bottle="${output_dir}/agent-ferry--0.1.1.arm64_sonoma.bottle.tar.gz"
+bottle="${output_dir}/agent-ferry-0.1.1.arm64_sonoma.bottle.tar.gz"
 [[ -f "${bottle}" ]]
+[[ ! -e "${output_dir}/agent-ferry--0.1.1.arm64_sonoma.bottle.tar.gz" ]]
 tar -tzf "${bottle}" | grep -q '^agent-ferry/0.1.1/.brew/agent-ferry.rb$'
 tar -tzf "${bottle}" | grep -q '^agent-ferry/0.1.1/bin/agentferryd$'
 grep -q '^install --build-bottle --skip-post-install agent-ferry/bottle/agent-ferry$' "${brew_log}"

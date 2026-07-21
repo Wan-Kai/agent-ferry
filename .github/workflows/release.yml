@@ -172,8 +172,8 @@ jobs:
           release_root="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${version}"
           arm64_source="agent-ferry-v${version}-darwin-arm64.tar.gz"
           x86_source="agent-ferry-v${version}-darwin-x86_64.tar.gz"
-          arm64_bottle="agent-ferry--${version}.arm64_sonoma.bottle.tar.gz"
-          x86_bottle="agent-ferry--${version}.sequoia.bottle.tar.gz"
+          arm64_bottle="agent-ferry-${version}.arm64_sonoma.bottle.tar.gz"
+          x86_bottle="agent-ferry-${version}.sequoia.bottle.tar.gz"
           arm64_source_sha="$(shasum -a 256 "${distribution}/${arm64_source}" | awk '{print $1}')"
           x86_source_sha="$(shasum -a 256 "${distribution}/${x86_source}" | awk '{print $1}')"
           arm64_bottle_sha="$(shasum -a 256 "${distribution}/${arm64_bottle}" | awk '{print $1}')"
@@ -200,13 +200,20 @@ jobs:
               agent-ferry.rb > checksums.txt
           )
       - name: Verify real Bottle install lifecycle
+        shell: bash
         run: |
           mkdir -p target/release-evidence
-          ./scripts/test-homebrew-install \
-            --version "${{ needs.package.outputs.version }}" \
-            --distribution-dir target/distribution \
-            --expected-tag arm64_sonoma 2>&1 | \
-            tee target/release-evidence/homebrew-e2e.log
+          if ! ./scripts/test-homebrew-install \
+              --version "${{ needs.package.outputs.version }}" \
+              --distribution-dir target/distribution \
+              --expected-tag arm64_sonoma \
+              >target/release-evidence/homebrew-e2e.log 2>&1; then
+            cat target/release-evidence/homebrew-e2e.log
+            exit 1
+          fi
+          cat target/release-evidence/homebrew-e2e.log
+          grep -q '真实 Homebrew Bottle 下载、安装、激活、状态、日志和双阶段卸载通过' \
+            target/release-evidence/homebrew-e2e.log
       - name: Bind verification evidence to artifacts
         shell: bash
         run: |
@@ -215,8 +222,8 @@ jobs:
             --evidence target/release-evidence/verification.json
             --artifact target/distribution/agent-ferry-v${{ needs.package.outputs.version }}-darwin-arm64.tar.gz
             --artifact target/distribution/agent-ferry-v${{ needs.package.outputs.version }}-darwin-x86_64.tar.gz
-            --artifact target/distribution/agent-ferry--${{ needs.package.outputs.version }}.arm64_sonoma.bottle.tar.gz
-            --artifact target/distribution/agent-ferry--${{ needs.package.outputs.version }}.sequoia.bottle.tar.gz
+            --artifact target/distribution/agent-ferry-${{ needs.package.outputs.version }}.arm64_sonoma.bottle.tar.gz
+            --artifact target/distribution/agent-ferry-${{ needs.package.outputs.version }}.sequoia.bottle.tar.gz
             --artifact target/distribution/agent-ferry-extension-v${{ needs.package.outputs.version }}-chrome.zip
             --artifact target/distribution/agent-ferry.rb
             --artifact target/distribution/checksums.txt
@@ -229,8 +236,8 @@ jobs:
           subject-path: |
             target/distribution/agent-ferry-v${{ needs.package.outputs.version }}-darwin-arm64.tar.gz
             target/distribution/agent-ferry-v${{ needs.package.outputs.version }}-darwin-x86_64.tar.gz
-            target/distribution/agent-ferry--${{ needs.package.outputs.version }}.arm64_sonoma.bottle.tar.gz
-            target/distribution/agent-ferry--${{ needs.package.outputs.version }}.sequoia.bottle.tar.gz
+            target/distribution/agent-ferry-${{ needs.package.outputs.version }}.arm64_sonoma.bottle.tar.gz
+            target/distribution/agent-ferry-${{ needs.package.outputs.version }}.sequoia.bottle.tar.gz
             target/distribution/agent-ferry-extension-v${{ needs.package.outputs.version }}-chrome.zip
             target/distribution/agent-ferry.rb
       - uses: actions/upload-artifact@v4
@@ -248,8 +255,8 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             target/distribution/agent-ferry-v${{ needs.package.outputs.version }}-darwin-arm64.tar.gz \
             target/distribution/agent-ferry-v${{ needs.package.outputs.version }}-darwin-x86_64.tar.gz \
-            target/distribution/agent-ferry--${{ needs.package.outputs.version }}.arm64_sonoma.bottle.tar.gz \
-            target/distribution/agent-ferry--${{ needs.package.outputs.version }}.sequoia.bottle.tar.gz \
+            target/distribution/agent-ferry-${{ needs.package.outputs.version }}.arm64_sonoma.bottle.tar.gz \
+            target/distribution/agent-ferry-${{ needs.package.outputs.version }}.sequoia.bottle.tar.gz \
             target/distribution/agent-ferry-extension-v${{ needs.package.outputs.version }}-chrome.zip \
             target/distribution/agent-ferry.rb \
             target/distribution/checksums.txt \

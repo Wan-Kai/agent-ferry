@@ -37,8 +37,8 @@ Apple、Chrome 或 Hermes 凭据。
 ```text
 agent-ferry-v<version>-darwin-arm64.tar.gz
 agent-ferry-v<version>-darwin-x86_64.tar.gz
-agent-ferry--<version>.arm64_sonoma.bottle.tar.gz
-agent-ferry--<version>.sequoia.bottle.tar.gz
+agent-ferry-<version>.arm64_sonoma.bottle.tar.gz
+agent-ferry-<version>.sequoia.bottle.tar.gz
 agent-ferry-extension-v<version>-chrome.zip
 agent-ferry.rb
 checksums.txt
