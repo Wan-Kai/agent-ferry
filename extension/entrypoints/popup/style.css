@@ -77,6 +77,13 @@ a { color: inherit; text-decoration: none; }
   flex-shrink: 0;
 }
 
+.app-header.send-header {
+  min-height: 68px;
+  padding-block: 12px;
+  background:
+    linear-gradient(90deg, color-mix(in oklch, var(--accent-soft) 58%, var(--surface)), var(--surface) 46%);
+}
+
 .brand {
   min-width: 0;
   display: flex;
@@ -84,18 +91,22 @@ a { color: inherit; text-decoration: none; }
   gap: 9px;
 }
 
+.send-brand { gap: 11px; }
+
 .brand-mark {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   display: grid;
   place-items: center;
-  border-radius: 7px;
+  overflow: hidden;
+  border-radius: 9px;
   flex-shrink: 0;
-  background: var(--fg);
-  color: var(--surface);
-  font: 600 12px/1 var(--font-display);
-  letter-spacing: 0.02em;
+  background: var(--accent-soft);
+  box-shadow: 0 5px 14px color-mix(in oklch, var(--accent) 15%, transparent);
 }
+
+.brand-mark img { width: 100%; height: 100%; object-fit: cover; }
+.send-brand .brand-mark { width: 38px; height: 38px; border-radius: 11px; }
 
 .brand-copy { min-width: 0; }
 
@@ -105,11 +116,25 @@ a { color: inherit; text-decoration: none; }
   letter-spacing: -0.01em;
 }
 
+.send-brand .brand-name {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
 .brand-caption,
 .screen-caption {
   margin-top: 2px;
   color: var(--muted);
   font: 400 10px/1.2 var(--font-body);
+}
+
+.send-brand .brand-caption {
+  margin-top: 4px;
+  color: color-mix(in oklch, var(--muted) 88%, var(--accent));
+  font-size: 10.5px;
+  font-weight: 450;
+  letter-spacing: 0.005em;
 }
 
 .header-title-group { min-width: 0; flex: 1; }

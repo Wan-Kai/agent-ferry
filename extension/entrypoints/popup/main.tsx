@@ -200,10 +200,10 @@ async function nativeRequest<T>(command: Record<string, unknown>): Promise<T> {
 }
 
 function Header({ view, connection, onSettings, onBack }: { view: View; connection: ConnectionState; onSettings(): void; onBack(): void }) {
-  const copy = view === "send" ? ["Agent Ferry", "发送当前页面"] : view === "history" ? ["历史", "任务会在后台继续运行"] : view === "archive" ? ["任务档案", "搜索全部历史记录"] : view === "detail" ? ["任务详情", "执行阶段与 Agent 输出"] : ["设置", "连接、Agent 与 Prompt"];
+  const copy = view === "send" ? ["Agent Ferry", "让网页进入 Agent 的上下文"] : view === "history" ? ["历史", "任务会在后台继续运行"] : view === "archive" ? ["任务档案", "搜索全部历史记录"] : view === "detail" ? ["任务详情", "执行阶段与 Agent 输出"] : ["设置", "连接、Agent 与 Prompt"];
   const isSubView = view === "detail" || view === "archive";
-  return <header className="app-header">
-    {isSubView ? <><button className="back-button" type="button" aria-label="返回上一页" onClick={onBack}><Icon name="arrow-left" /></button><div className="header-title-group"><h1 className="screen-title">{copy[0]}</h1><p className="screen-caption">{copy[1]}</p></div></> : <div className="brand"><div className="brand-mark">AF</div><div className={view === "send" ? "brand-copy" : "header-title-group"}><h1 className={view === "send" ? "brand-name" : "screen-title"}>{copy[0]}</h1><p className={view === "send" ? "brand-caption" : "screen-caption"}>{copy[1]}</p></div></div>}
+  return <header className={`app-header ${view === "send" ? "send-header" : ""}`}>
+    {isSubView ? <><button className="back-button" type="button" aria-label="返回上一页" onClick={onBack}><Icon name="arrow-left" /></button><div className="header-title-group"><h1 className="screen-title">{copy[0]}</h1><p className="screen-caption">{copy[1]}</p></div></> : <div className={`brand ${view === "send" ? "send-brand" : ""}`}><div className="brand-mark"><img src="/icons/icon-48.png" alt="" /></div><div className={view === "send" ? "brand-copy" : "header-title-group"}><h1 className={view === "send" ? "brand-name" : "screen-title"}>{copy[0]}</h1><p className={view === "send" ? "brand-caption" : "screen-caption"}>{copy[1]}</p></div></div>}
     <button className={`connection-status connection-${connection.kind}`} type="button" aria-label="查看本地连接设置" onClick={onSettings}><span className="status-dot"/><span className="status-tooltip">{connection.kind === "ready" ? `本地连接已就绪 · v${connection.result.core_version}` : connection.kind === "checking" ? "正在检查本地连接" : connection.detail}</span></button>
   </header>;
 }
@@ -392,11 +392,7 @@ function App() {
   const selectedProductTitle = products.find((product) => product.id === selectedProduct)?.title ?? "Agent";
   const finalPromptBytes = new TextEncoder().encode(finalPrompt).byteLength;
   const promptInvalid = !finalPrompt.trim() || finalPromptBytes > MAX_PROMPT_LENGTH;
-  const sendButtonLabel = selectedTarget && selectedLocation
-    ? selectedProduct === "hermes"
-      ? `交给 Hermes · ${selectedLocation.title}`
-      : `在本机 ${selectedProductTitle} 中开始`
-    : "请选择可用的运行位置";
+  const sendButtonLabel = selectedTarget && selectedLocation ? "开始任务" : "请选择可用的运行位置";
   const dataTransferNote = selectedTarget && selectedLocation
     ? selectedLocation.locality === "remote"
       ? `点击后将提取当前页正文和上方任务指令，并发送到你配置的 ${selectedProductTitle} · ${selectedLocation.title}。`
