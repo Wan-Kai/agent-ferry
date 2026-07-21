@@ -31,10 +31,10 @@
   Homebrew 生命周期 E2E 中要求日志出现 `Pouring ...bottle.tar.gz`；RC 保存绑定的
   `homebrew-e2e.log`。它使用 fake `launchctl`，真实 launchd、Keychain 和宿主 Agent 仍按下列 Case
   延迟验收。
-- 通过 `brew install Wan-Kai/tap/agent-ferry` 完成无 sudo 安装；验证 Homebrew 没有退回 source
-  install，keg/opt、LaunchAgent 和 Chrome Native Host 各自落在约定路径，并核对 Bottle/Formula
-  SHA256 与 Artifact Attestation。
-- 验证 `brew upgrade` 后 daemon 切换到新 keg；`aferry uninstall` 只清理运行资源，随后 `brew uninstall` 删除程序。
+- 通过 `brew install Wan-Kai/tap/agent-ferry` 完成无 sudo 安装，再执行 `aferry activate`；验证
+  Homebrew 没有退回 source install，keg/opt、LaunchAgent 和 Chrome Native Host 各自落在约定
+  路径，并核对 Bottle/Formula SHA256 与 Artifact Attestation。
+- 验证 `brew upgrade` 和再次 `aferry activate` 后 daemon 切换到新 keg；`aferry uninstall` 只清理运行资源，随后 `brew uninstall` 删除程序。
 - 真实 Keychain create/read/delete smoke，输出中不出现 Secret。
 - Native Host manifest、私有 Socket、文件权限和 daemon 生命周期。
 - 已安装 Claude、Codex、OpenCode 的检测、认证提示和一次性任务。

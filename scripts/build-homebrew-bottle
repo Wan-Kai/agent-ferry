@@ -72,9 +72,8 @@ mkdir -p "${tap_root}/Formula"
 cp "${formula}" "${tap_root}/Formula/agent-ferry.rb"
 
 # Bottle 必须由 Homebrew 从已安装 keg 生成，不能把普通归档改名伪装成 Bottle。
-# 跳过 post_install 是为了避免构建 runner 注册真实 LaunchAgent；安装生命周期由独立 E2E 验证。
 HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" install \
-  --build-bottle --skip-post-install "${tap_name}/agent-ferry"
+  --build-bottle "${tap_name}/agent-ferry"
 installed="true"
 (
   cd "${output_dir}"

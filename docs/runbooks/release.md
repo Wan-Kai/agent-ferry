@@ -50,7 +50,8 @@ Artifact Attestation。
 
 汇总后，macOS runner 创建临时 Tap，先用 `brew fetch --force-bottle` 禁止 source fallback，再用真实
 `brew install` 安装同一 Formula，并要求日志出现 `Pouring ...bottle.tar.gz`。随后在隔离 HOME 中
-验证服务状态、Native Host allowlist、日志读取、`aferry uninstall` 与 `brew uninstall`。
+执行 `aferry activate`，验证服务状态、Native Host allowlist、日志读取、`aferry uninstall` 与
+`brew uninstall`。
 LaunchAgent 调用使用可观察的 fake `launchctl`，因此这条门禁能证明 Homebrew 与 Ferry 的进程/文件
 契约，但不能替代真实用户会话中的 launchd smoke。脱敏输出保存为 `homebrew-e2e.log`，并由同一份
 `verification.json` 绑定 SHA-256。
@@ -68,8 +69,8 @@ Homebrew 所有权门禁。
 5. 创建不可移动的新 tag：
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
 tag workflow 先创建不可变 GitHub Release，再 checkout `Wan-Kai/homebrew-tap`，复制生成的 Formula
@@ -80,6 +81,7 @@ Release 下载 `agent-ferry.rb` 并以单独 commit 恢复 Tap。
 
 ```bash
 brew install Wan-Kai/tap/agent-ferry
+aferry activate
 ```
 
 ## 验收证据

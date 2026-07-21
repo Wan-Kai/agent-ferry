@@ -11,4 +11,5 @@
 ## 当前补充决策
 
 - [ADR 0030：保存有界的本地任务历史](./0030-bounded-local-task-history.md)，取代 ADR 0028、0029 中禁止 Ferry 历史的部分。
-- [ADR 0033：使用原生 Homebrew Bottle 分发预编译 Core](./0033-native-homebrew-bottles.md)，取代 ADR 0032 的普通归档 Formula 发行形式。
+- [ADR 0033：使用原生 Homebrew Bottle 分发预编译 Core](./0033-native-homebrew-bottles.md)，已由 ADR 0034 取代。
+- [ADR 0034：Homebrew 安装与用户级激活分离](./0034-explicit-homebrew-activation.md)，保留原生 Bottle，并用显式 CLI 命令完成 LaunchAgent 与 Native Host 激活。

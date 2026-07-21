@@ -22,7 +22,7 @@ for binary in aferry agentferryd agentferry-host; do
 done
 
 "${script_dir}/package-homebrew-release" \
-  --version 0.1.1 \
+  --version 0.1.2 \
   --arm64-bin-dir "${bin_dir}" \
   --x86_64-bin-dir "${bin_dir}" \
   --output-dir "${release_dir}" \
@@ -36,7 +36,11 @@ if grep -q '__AGENT_FERRY_' "${formula}"; then
   exit 1
 fi
 grep -q 'ommpdijpcidnicpbalkpnggoljhapcel' "${formula}"
-grep -q 'AGENT_FERRY_SKIP_ACTIVATION' "${formula}"
+grep -q 'aferry activate' "${formula}"
+if grep -qE 'post_install|AGENT_FERRY_ACTIVATION_HOME|Etc.getpwuid' "${formula}"; then
+  printf '%s\n' 'Homebrew Formula 不得在安装沙箱中写用户级激活资源。' >&2
+  exit 1
+fi
 grep -q 'ManagedExternally\|brew uninstall' \
   "${repository_root}/crates/agent-ferry-cli/src/uninstall.rs" \
   "${formula}"
@@ -45,24 +49,24 @@ bottled_formula="${release_dir}/agent-ferry-bottled.rb"
 "${node_bin}" "${script_dir}/render-homebrew-formula.mjs" \
   "${repository_root}/release/homebrew/agent-ferry.rb.in" \
   "${bottled_formula}" \
-  0.1.1 \
-  "https://github.com/Wan-Kai/agent-ferry/releases/download/v0.1.1/agent-ferry-v0.1.1-darwin-arm64.tar.gz" \
+  0.1.2 \
+  "https://github.com/Wan-Kai/agent-ferry/releases/download/v0.1.2/agent-ferry-v0.1.2-darwin-arm64.tar.gz" \
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-  "https://github.com/Wan-Kai/agent-ferry/releases/download/v0.1.1/agent-ferry-v0.1.1-darwin-x86_64.tar.gz" \
+  "https://github.com/Wan-Kai/agent-ferry/releases/download/v0.1.2/agent-ferry-v0.1.2-darwin-x86_64.tar.gz" \
   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   ommpdijpcidnicpbalkpnggoljhapcel \
-  --bottle-root-url "https://github.com/Wan-Kai/agent-ferry/releases/download/v0.1.1" \
+  --bottle-root-url "https://github.com/Wan-Kai/agent-ferry/releases/download/v0.1.2" \
   --arm64-bottle-tag arm64_sonoma \
   --arm64-bottle-sha cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
   --x86-64-bottle-tag sequoia \
   --x86-64-bottle-sha dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 /usr/bin/ruby -c "${bottled_formula}" | grep -q 'Syntax OK'
-grep -q 'root_url "https://github.com/Wan-Kai/agent-ferry/releases/download/v0.1.1"' "${bottled_formula}"
+grep -q 'root_url "https://github.com/Wan-Kai/agent-ferry/releases/download/v0.1.2"' "${bottled_formula}"
 grep -q 'arm64_sonoma: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"' "${bottled_formula}"
 grep -q 'sequoia: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"' "${bottled_formula}"
 
 for architecture in arm64 x86_64; do
-  archive="${release_dir}/agent-ferry-v0.1.1-darwin-${architecture}.tar.gz"
+  archive="${release_dir}/agent-ferry-v0.1.2-darwin-${architecture}.tar.gz"
   expected="$(awk -v name="$(basename "${archive}")" '$2 == name { print $1 }' "${release_dir}/checksums.txt")"
   actual="$(/usr/bin/shasum -a 256 "${archive}" | awk '{print $1}')"
   [[ "${expected}" == "${actual}" ]]

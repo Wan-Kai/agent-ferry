@@ -37,15 +37,17 @@ Apple Developer 账号。macOS 安装轻量 Core：
 
 ```bash
 brew install Wan-Kai/tap/agent-ferry
+aferry activate
 ```
 
 需要已能正常运行的 Homebrew；安装预编译二进制，不要求 Rust、Node.js、Apple Developer 账号或
 `sudo`。完整命令会在 Homebrew 6 中只信任目标 Formula，不会扩大为整个 Tap 的全局信任。
 
 Formula 按 CPU 与 macOS 选择 GitHub macOS CI 生成的原生 Bottle，并在安装前校验固定 SHA-256；
-没有匹配 Bottle 时才使用预编译 fallback 归档。安装后的 `post_install` 注册 Chrome Native Host
-并启动当前用户的 LaunchAgent；整个过程不使用 `sudo`。GitHub Release 同时发布构建来源证明，
-Chrome 固定扩展身份仍由同一发行门禁校验。
+没有匹配 Bottle 时才使用预编译 fallback 归档。Homebrew 只管理程序文件；用户随后执行幂等的
+`aferry activate`，在正常终端环境中注册 Chrome Native Host 并启动当前用户的 LaunchAgent，整个
+过程不使用 `sudo`。GitHub Release 同时发布构建来源证明，Chrome 固定扩展身份仍由同一发行门禁
+校验。
 
 安装、升级和卸载行为见 [Homebrew 安装](./docs/runbooks/installation.md)，正式发布配置见
 [Homebrew 与 GitHub Release 发布](./docs/runbooks/release.md)。
@@ -58,10 +60,11 @@ Chrome 发行构建与 Core 发行包共用同一份扩展身份文件。正式 
   --output-dir target/distribution
 ```
 
-升级由 Homebrew 负责，升级后的 `post_install` 会让 daemon 切换到新 keg：
+升级由 Homebrew 负责；升级后重新激活，让 daemon 和 Native Host 切换到新 keg：
 
 ```bash
 brew upgrade Wan-Kai/tap/agent-ferry
+aferry activate
 ```
 
 默认卸载只移除 Agent Ferry 程序、后台服务和 Native Host，保留用户数据、日志与凭据：

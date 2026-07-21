@@ -37,6 +37,8 @@ mod service;
 mod uninstall;
 mod update;
 
+const PUBLIC_CHROME_EXTENSION_ID: &str = "ommpdijpcidnicpbalkpnggoljhapcel";
+
 #[derive(Debug, Parser)]
 #[command(name = "aferry", version, about = "Agent Ferry 本机配置与诊断")]
 struct Cli {
@@ -46,6 +48,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    /// 激活后台服务并注册正式 Chrome Native Host
+    Activate(OutputArgs),
     /// 只读检查当前安装状态并给出下一步命令
     Setup(OutputArgs),
     /// 只读执行完整健康检查；发现问题时返回非零退出码
@@ -445,6 +449,7 @@ fn run(cli: Cli) -> Result<i32, CliError> {
             println!("Agent Ferry {}", env!("CARGO_PKG_VERSION"));
             Ok(0)
         }
+        Some(CliCommand::Activate(output)) => run_activate(&output),
         Some(CliCommand::Setup(args)) => {
             let report = collect_report()?;
             print_report(&report, args.json)?;
@@ -496,6 +501,37 @@ fn run(cli: Cli) -> Result<i32, CliError> {
         #[cfg(debug_assertions)]
         Some(CliCommand::Dev { command }) => run_dev_command(&command),
     }
+}
+
+fn run_activate(output: &OutputArgs) -> Result<i32, CliError> {
+    let executable_dir = env::current_exe()?
+        .parent()
+        .ok_or_else(|| io::Error::other("aferry 可执行文件没有父目录"))?
+        .to_path_buf();
+    let daemon_path = executable_dir.join("agentferryd");
+    let host_path = executable_dir.join("agentferry-host");
+
+    // 激活必须发生在用户自己的终端环境中，避免 Homebrew post_install 沙箱把资源写入临时 HOME。
+    // 两个步骤都是幂等的；任一步中断后重新执行本命令即可收敛到完整状态。
+    register_native_host(PUBLIC_CHROME_EXTENSION_ID, &host_path)?;
+    let manager = service::ServiceManager::discover()?;
+    let report = manager.install(Some(&daemon_path))?;
+    if output.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "state": "activated",
+                "extension_id": PUBLIC_CHROME_EXTENSION_ID,
+                "service": report,
+            })
+        );
+    } else {
+        println!("Agent Ferry 已激活");
+        println!("  Chrome 扩展: {PUBLIC_CHROME_EXTENSION_ID}");
+        println!("  后台服务: {:?}", report.state);
+        println!("  下一步: aferry doctor");
+    }
+    Ok(0)
 }
 
 fn run_service_command(command: ServiceCommand) -> Result<i32, CliError> {

@@ -134,9 +134,9 @@ HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" trust --formula "${tap_name}/agent-ferry
 # `fetch --force-bottle` 和安装日志共同证明 Formula 没有退回会触发 CLT 检查的源码路径。
 HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" fetch \
   --force-bottle "${tap_name}/agent-ferry" >/dev/null
-HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" install \
-  --skip-post-install "${tap_name}/agent-ferry" 2>&1 | tee "${install_log}"
 installed="true"
+HOMEBREW_NO_AUTO_UPDATE=1 \
+  "${brew_bin}" install "${tap_name}/agent-ferry" 2>&1 | tee "${install_log}"
 grep -q "Pouring agent-ferry-${version}.${expected_tag}.bottle.tar.gz" "${install_log}"
 
 prefix="$("${brew_bin}" --prefix agent-ferry)"
@@ -146,13 +146,7 @@ HOME="${test_home}" \
   TMPDIR="${test_home}/tmp" \
   AGENT_FERRY_HOME="${test_home}/.agent-ferry" \
   AFERRY_LAUNCHCTL_PATH="${launchctl}" \
-  "${aferry}" service install --daemon-path "${prefix}/bin/agentferryd" >/dev/null
-HOME="${test_home}" \
-  TMPDIR="${test_home}/tmp" \
-  AGENT_FERRY_HOME="${test_home}/.agent-ferry" \
-  "${aferry}" native-host register \
-    --extension-id "${extension_id}" \
-    --host-path "${prefix}/bin/agentferry-host" >/dev/null
+  "${aferry}" activate
 HOME="${test_home}" \
   AGENT_FERRY_HOME="${test_home}/.agent-ferry" \
   AFERRY_LAUNCHCTL_PATH="${launchctl}" \

@@ -2,9 +2,8 @@
 
 ## 状态
 
-Accepted，2026-07-21。取代 [ADR 0032](./0032-homebrew-distribution-without-developer-id.md) 中把普通
-双架构归档直接作为 Formula source 的发行形式；保留 Homebrew 渠道、无 Developer ID、用户数据与
-卸载边界。
+Superseded，2026-07-21。由 [ADR 0034](./0034-explicit-homebrew-activation.md) 取代；原生 Bottle
+构建和发行决策保持不变，用户级激活从 Formula `post_install` 移到显式 CLI 命令。
 
 ## 背景
 

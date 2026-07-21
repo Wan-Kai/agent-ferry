@@ -4,7 +4,7 @@ import "./style.css";
 
 const NATIVE_HOST_NAME = "com.agentferry.host";
 const PROTOCOL_VERSION = 1;
-const INSTALL_COMMAND = "brew install Wan-Kai/tap/agent-ferry";
+const INSTALL_COMMAND = "brew install Wan-Kai/tap/agent-ferry\naferry activate";
 const PRIVACY_URL = "https://github.com/Wan-Kai/agent-ferry/blob/main/PRIVACY.md";
 const SUPPORT_URL = "https://github.com/Wan-Kai/agent-ferry/issues";
 
@@ -89,7 +89,7 @@ function App() {
       <div className="step-number">2</div>
       <div className="step-content">
         <h2>确认连接</h2>
-        <p>Homebrew 安装完成后会注册 Native Host 并启动 agentferryd。完成后回到这里重新检查。</p>
+        <p>安装并执行激活命令后，会注册 Native Host 并启动 agentferryd。完成后回到这里重新检查。</p>
         <button className="check-button" type="button" disabled={connection.kind === "checking"} onClick={() => void checkConnection()}>{connection.kind === "checking" ? "正在检查…" : "重新检查"}</button>
       </div>
     </section>

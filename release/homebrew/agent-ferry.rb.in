@@ -1,4 +1,6 @@
 class AgentFerry < Formula
+  # 正式扩展 ID 保留在发行产物中，便于审核 Formula 与 CLI 内置身份是否来自同一发布配置。
+  # Chrome allowlist 的实际写入由用户终端中的 `aferry activate` 完成：__AGENT_FERRY_EXTENSION_ID__
   desc "Browser-to-agent handoff for local and remote AI coding agents"
   homepage "https://github.com/Wan-Kai/agent-ferry"
   version "__AGENT_FERRY_VERSION__"
@@ -21,19 +23,12 @@ __AGENT_FERRY_BOTTLE_BLOCK__
     bin.install "bin/aferry", "bin/agentferryd", "bin/agentferry-host"
   end
 
-  def post_install
-    return if ENV["AGENT_FERRY_SKIP_ACTIVATION"] == "1"
-
-    system opt_bin/"aferry", "service", "install",
-           "--daemon-path", opt_bin/"agentferryd"
-    system opt_bin/"aferry", "native-host", "register",
-           "--extension-id", "__AGENT_FERRY_EXTENSION_ID__",
-           "--host-path", opt_bin/"agentferry-host"
-  end
-
   def caveats
     <<~EOS
-      Agent Ferry 已安装并启动当前用户的后台服务，同时注册 Chrome Native Host。
+      激活当前用户的后台服务和 Chrome Native Host：
+        aferry activate
+
+      安装或升级后执行一次即可；该命令可安全重复执行。
 
       卸载前先清理运行资源和 Native Host，再让 Homebrew 删除程序：
         aferry uninstall

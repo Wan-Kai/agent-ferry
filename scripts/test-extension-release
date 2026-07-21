@@ -13,7 +13,7 @@ printf '%s\n' '{"schema_version":1,"extension_id":"bmbgkcbcohmlbiaigfoilnaobdoon
   --extension-identity "${identity}" \
   --output-dir "${temporary_root}/release" >/dev/null
 
-archive="${temporary_root}/release/agent-ferry-extension-v0.1.1-chrome.zip"
+archive="${temporary_root}/release/agent-ferry-extension-v0.1.2-chrome.zip"
 [[ -f "${archive}" ]]
 [[ -f "${archive}.sha256" ]]
 /usr/bin/unzip -p "${archive}" manifest.json >"${temporary_root}/manifest.json"
@@ -54,6 +54,7 @@ grep -q '点击后将提取当前页正文和上方任务指令' "${temporary_ro
 /usr/bin/unzip -l "${archive}" | grep -q ' onboarding.html$'
 /usr/bin/unzip -p "${archive}" 'chunks/onboarding-*.js' >"${temporary_root}/onboarding.js"
 grep -q 'brew install Wan-Kai/tap/agent-ferry' "${temporary_root}/onboarding.js"
+grep -q 'aferry activate' "${temporary_root}/onboarding.js"
 grep -q 'PRIVACY.md' "${temporary_root}/onboarding.js"
 /usr/bin/unzip -p "${archive}" background.js >"${temporary_root}/background.js"
 grep -q 'onboarding.html' "${temporary_root}/background.js"

@@ -54,6 +54,77 @@ fn assert_valid_plist(plist: &Path) {
 }
 
 #[test]
+fn activate_discovers_packaged_binaries_and_is_idempotent() {
+    let home = temporary_home();
+    let bin = home.join("package/bin");
+    fs::create_dir_all(&bin).expect("创建测试安装目录");
+    let packaged_aferry = bin.join("aferry");
+    fs::copy(env!("CARGO_BIN_EXE_aferry"), &packaged_aferry).expect("复制 aferry");
+    let daemon = bin.join("agentferryd");
+    let host = bin.join("agentferry-host");
+    make_executable(&daemon, "#!/bin/sh\nexit 0\n");
+    make_executable(&host, "#!/bin/sh\nexit 0\n");
+
+    let launchctl = home.join("fake-launchctl");
+    make_executable(
+        &launchctl,
+        r#"#!/bin/sh
+case "$1" in
+  manageruid) printf '%s\n' '501' ;;
+  print)
+    if [ -f "$HOME/launchctl-loaded" ]; then
+      printf '%s\n' 'state = running' 'pid = 2468'
+    else
+      exit 113
+    fi
+    ;;
+  bootstrap) : > "$HOME/launchctl-loaded" ;;
+  bootout) rm -f "$HOME/launchctl-loaded" ;;
+  *) exit 64 ;;
+esac
+"#,
+    );
+
+    for _ in 0..2 {
+        let activated = Command::new(&packaged_aferry)
+            .env("HOME", &home)
+            .env("AGENT_FERRY_HOME", home.join(".agent-ferry"))
+            .env("AFERRY_LAUNCHCTL_PATH", &launchctl)
+            .args(["activate", "--json"])
+            .output()
+            .expect("运行 activate");
+        assert!(
+            activated.status.success(),
+            "activate 失败: {}",
+            String::from_utf8_lossy(&activated.stderr)
+        );
+        assert!(String::from_utf8_lossy(&activated.stdout).contains("\"state\":\"activated\""));
+    }
+
+    let plist = home.join("Library/LaunchAgents/com.agentferry.daemon.plist");
+    let plist_program = Command::new("/usr/bin/plutil")
+        .args(["-extract", "ProgramArguments.0", "raw", "-o", "-"])
+        .arg(&plist)
+        .output()
+        .expect("读取 activate 生成的 plist");
+    assert!(plist_program.status.success());
+    assert_eq!(
+        String::from_utf8(plist_program.stdout)
+            .expect("plist program UTF-8")
+            .trim(),
+        daemon.to_str().expect("daemon 路径 UTF-8")
+    );
+    let manifest = home.join(
+        "Library/Application Support/Google/Chrome/NativeMessagingHosts/com.agentferry.host.json",
+    );
+    let manifest_text = fs::read_to_string(&manifest).expect("读取 activate 生成的 manifest");
+    assert!(manifest_text.contains("chrome-extension://ommpdijpcidnicpbalkpnggoljhapcel/"));
+    assert!(manifest_text.contains(host.to_str().expect("host 路径 UTF-8")));
+
+    fs::remove_dir_all(home).expect("清理测试目录");
+}
+
+#[test]
 fn service_commands_manage_launch_agent_and_expose_logs() {
     let home = temporary_home();
     fs::create_dir_all(&home).expect("创建测试 home");
