@@ -12,18 +12,18 @@ on:
         type: string
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  macos:
-    name: Homebrew macOS release
+  package:
+    name: Package release inputs
     runs-on: macos-14
+    outputs:
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@v7
       - name: Resolve release version
@@ -61,9 +61,9 @@ jobs:
           ./scripts/build-macos-release \
             --version "${{ steps.release.outputs.version }}" \
             --output-dir target/release-binaries
-      - name: Package Homebrew and Chrome artifacts
+      - name: Package source archives and Chrome extension
         run: |
-          mkdir -p target/distribution target/release-evidence
+          mkdir -p target/distribution
           ./scripts/package-homebrew-release \
             --version "${{ steps.release.outputs.version }}" \
             --arm64-bin-dir target/release-binaries/arm64 \
@@ -74,18 +74,150 @@ jobs:
           ./scripts/package-chrome-extension \
             --extension-identity release/chrome-extension-identity.json \
             --output-dir target/distribution
-      - name: Verify real Homebrew install lifecycle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-ferry-v${{ steps.release.outputs.version }}-release-inputs
+          if-no-files-found: error
+          path: target/distribution/
+
+  bottle:
+    name: Bottle ${{ matrix.tag }}
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            tag: arm64_sonoma
+          - runner: macos-15-intel
+            tag: sequoia
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.85.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v5
+        with:
+          name: agent-ferry-v${{ needs.package.outputs.version }}-release-inputs
+          path: target/release-inputs
+      - name: Render local Formula for native bottling
+        shell: bash
         run: |
-          ./scripts/test-homebrew-install 2>&1 | \
+          version="${{ needs.package.outputs.version }}"
+          inputs="${PWD}/target/release-inputs"
+          arm64_name="agent-ferry-v${version}-darwin-arm64.tar.gz"
+          x86_name="agent-ferry-v${version}-darwin-x86_64.tar.gz"
+          arm64_sha="$(shasum -a 256 "${inputs}/${arm64_name}" | awk '{print $1}')"
+          x86_sha="$(shasum -a 256 "${inputs}/${x86_name}" | awk '{print $1}')"
+          extension_id="$(plutil -extract extension_id raw -o - release/chrome-extension-identity.json)"
+          mkdir -p target/bottle-input target/bottles
+          "$(./scripts/find-node)" scripts/render-homebrew-formula.mjs \
+            release/homebrew/agent-ferry.rb.in \
+            target/bottle-input/agent-ferry.rb \
+            "${version}" \
+            "file://${inputs}/${arm64_name}" "${arm64_sha}" \
+            "file://${inputs}/${x86_name}" "${x86_sha}" \
+            "${extension_id}"
+      - name: Build native Homebrew Bottle
+        run: |
+          ./scripts/build-homebrew-bottle \
+            --version "${{ needs.package.outputs.version }}" \
+            --formula target/bottle-input/agent-ferry.rb \
+            --output-dir target/bottles \
+            --expected-tag "${{ matrix.tag }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-ferry-v${{ needs.package.outputs.version }}-bottle-${{ matrix.tag }}
+          if-no-files-found: error
+          path: target/bottles/*.bottle.tar.gz
+
+  publish:
+    name: Verify and publish Homebrew release
+    needs: [package, bottle]
+    runs-on: macos-14
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.85.0
+          components: clippy,rustfmt
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - run: npm --prefix extension ci
+      - uses: actions/download-artifact@v5
+        with:
+          name: agent-ferry-v${{ needs.package.outputs.version }}-release-inputs
+          path: target/distribution
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: agent-ferry-v${{ needs.package.outputs.version }}-bottle-*
+          path: target/distribution
+          merge-multiple: true
+      - name: Render final bottled Formula
+        shell: bash
+        run: |
+          version="${{ needs.package.outputs.version }}"
+          distribution="${PWD}/target/distribution"
+          release_root="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${version}"
+          arm64_source="agent-ferry-v${version}-darwin-arm64.tar.gz"
+          x86_source="agent-ferry-v${version}-darwin-x86_64.tar.gz"
+          arm64_bottle="agent-ferry--${version}.arm64_sonoma.bottle.tar.gz"
+          x86_bottle="agent-ferry--${version}.sequoia.bottle.tar.gz"
+          arm64_source_sha="$(shasum -a 256 "${distribution}/${arm64_source}" | awk '{print $1}')"
+          x86_source_sha="$(shasum -a 256 "${distribution}/${x86_source}" | awk '{print $1}')"
+          arm64_bottle_sha="$(shasum -a 256 "${distribution}/${arm64_bottle}" | awk '{print $1}')"
+          x86_bottle_sha="$(shasum -a 256 "${distribution}/${x86_bottle}" | awk '{print $1}')"
+          extension_id="$(plutil -extract extension_id raw -o - release/chrome-extension-identity.json)"
+          "$(./scripts/find-node)" scripts/render-homebrew-formula.mjs \
+            release/homebrew/agent-ferry.rb.in \
+            target/distribution/agent-ferry.rb \
+            "${version}" \
+            "${release_root}/${arm64_source}" "${arm64_source_sha}" \
+            "${release_root}/${x86_source}" "${x86_source_sha}" \
+            "${extension_id}" \
+            --bottle-root-url "${release_root}" \
+            --arm64-bottle-tag arm64_sonoma \
+            --arm64-bottle-sha "${arm64_bottle_sha}" \
+            --x86-64-bottle-tag sequoia \
+            --x86-64-bottle-sha "${x86_bottle_sha}"
+          (
+            cd target/distribution
+            shasum -a 256 \
+              "${arm64_source}" "${x86_source}" \
+              "${arm64_bottle}" "${x86_bottle}" \
+              "agent-ferry-extension-v${version}-chrome.zip" \
+              agent-ferry.rb > checksums.txt
+          )
+      - name: Verify real Bottle install lifecycle
+        run: |
+          mkdir -p target/release-evidence
+          ./scripts/test-homebrew-install \
+            --version "${{ needs.package.outputs.version }}" \
+            --distribution-dir target/distribution \
+            --expected-tag arm64_sonoma 2>&1 | \
             tee target/release-evidence/homebrew-e2e.log
       - name: Bind verification evidence to artifacts
+        shell: bash
         run: |
           evidence_args=(
             --require-clean
             --evidence target/release-evidence/verification.json
-            --artifact target/distribution/agent-ferry-v${{ steps.release.outputs.version }}-darwin-arm64.tar.gz
-            --artifact target/distribution/agent-ferry-v${{ steps.release.outputs.version }}-darwin-x86_64.tar.gz
-            --artifact target/distribution/agent-ferry-extension-v${{ steps.release.outputs.version }}-chrome.zip
+            --artifact target/distribution/agent-ferry-v${{ needs.package.outputs.version }}-darwin-arm64.tar.gz
+            --artifact target/distribution/agent-ferry-v${{ needs.package.outputs.version }}-darwin-x86_64.tar.gz
+            --artifact target/distribution/agent-ferry--${{ needs.package.outputs.version }}.arm64_sonoma.bottle.tar.gz
+            --artifact target/distribution/agent-ferry--${{ needs.package.outputs.version }}.sequoia.bottle.tar.gz
+            --artifact target/distribution/agent-ferry-extension-v${{ needs.package.outputs.version }}-chrome.zip
             --artifact target/distribution/agent-ferry.rb
             --artifact target/distribution/checksums.txt
             --artifact target/release-evidence/homebrew-e2e.log
@@ -95,13 +227,15 @@ jobs:
         if: github.ref_type == 'tag'
         with:
           subject-path: |
-            target/distribution/agent-ferry-v${{ steps.release.outputs.version }}-darwin-arm64.tar.gz
-            target/distribution/agent-ferry-v${{ steps.release.outputs.version }}-darwin-x86_64.tar.gz
-            target/distribution/agent-ferry-extension-v${{ steps.release.outputs.version }}-chrome.zip
+            target/distribution/agent-ferry-v${{ needs.package.outputs.version }}-darwin-arm64.tar.gz
+            target/distribution/agent-ferry-v${{ needs.package.outputs.version }}-darwin-x86_64.tar.gz
+            target/distribution/agent-ferry--${{ needs.package.outputs.version }}.arm64_sonoma.bottle.tar.gz
+            target/distribution/agent-ferry--${{ needs.package.outputs.version }}.sequoia.bottle.tar.gz
+            target/distribution/agent-ferry-extension-v${{ needs.package.outputs.version }}-chrome.zip
             target/distribution/agent-ferry.rb
       - uses: actions/upload-artifact@v4
         with:
-          name: agent-ferry-v${{ steps.release.outputs.version }}-release-candidate
+          name: agent-ferry-v${{ needs.package.outputs.version }}-release-candidate
           if-no-files-found: error
           path: |
             target/distribution/
@@ -112,9 +246,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
-            target/distribution/agent-ferry-v${{ steps.release.outputs.version }}-darwin-arm64.tar.gz \
-            target/distribution/agent-ferry-v${{ steps.release.outputs.version }}-darwin-x86_64.tar.gz \
-            target/distribution/agent-ferry-extension-v${{ steps.release.outputs.version }}-chrome.zip \
+            target/distribution/agent-ferry-v${{ needs.package.outputs.version }}-darwin-arm64.tar.gz \
+            target/distribution/agent-ferry-v${{ needs.package.outputs.version }}-darwin-x86_64.tar.gz \
+            target/distribution/agent-ferry--${{ needs.package.outputs.version }}.arm64_sonoma.bottle.tar.gz \
+            target/distribution/agent-ferry--${{ needs.package.outputs.version }}.sequoia.bottle.tar.gz \
+            target/distribution/agent-ferry-extension-v${{ needs.package.outputs.version }}-chrome.zip \
             target/distribution/agent-ferry.rb \
             target/distribution/checksums.txt \
             --verify-tag \
@@ -135,5 +271,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Formula/agent-ferry.rb
-          git commit -m "agent-ferry ${{ steps.release.outputs.version }}"
+          git commit -m "agent-ferry ${{ needs.package.outputs.version }}"
           git push origin HEAD:main

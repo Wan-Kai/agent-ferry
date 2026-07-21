@@ -2,8 +2,8 @@
 
 ## 状态
 
-Accepted，2026-07-20。取代 [ADR 0031](./0031-cli-style-install-and-data-layout.md) 的程序安装与
-发行渠道；保留其中用户数据与系统规定目录的边界。
+Superseded，2026-07-21。由 [ADR 0033](./0033-native-homebrew-bottles.md) 取代普通归档 Formula
+的发行形式；Homebrew 渠道、数据目录与无 Developer ID 的其余边界继续有效。
 
 ## 背景
 

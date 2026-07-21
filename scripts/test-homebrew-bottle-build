@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-ferry-bottle-build-test.XXXXXX")"
+trap 'rm -rf "${temporary_root}"' EXIT
+fake_brew="${temporary_root}/brew"
+fake_tap="${temporary_root}/tap"
+output_dir="${temporary_root}/output"
+formula="${temporary_root}/agent-ferry.rb"
+brew_log="${temporary_root}/brew.log"
+mkdir -p "${output_dir}"
+printf '%s\n' 'class AgentFerry < Formula' 'end' >"${formula}"
+
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -euo pipefail' \
+  'printf "%s\n" "$*" >> "$AGENT_FERRY_BREW_TEST_LOG"' \
+  'case "${1:-}" in' \
+  '  tap-new) mkdir -p "$AGENT_FERRY_BREW_TEST_TAP/Formula" ;;' \
+  '  --repo) printf "%s\n" "$AGENT_FERRY_BREW_TEST_TAP" ;;' \
+  '  install) ;;' \
+  '  bottle)' \
+  '    root="$(mktemp -d "${TMPDIR:-/tmp}/fake-bottle.XXXXXX")"' \
+  '    mkdir -p "$root/agent-ferry/0.1.1/.brew" "$root/agent-ferry/0.1.1/bin"' \
+  '    printf "%s\n" "class AgentFerry < Formula" "end" > "$root/agent-ferry/0.1.1/.brew/agent-ferry.rb"' \
+  '    printf "%s\n" "{}" > "$root/agent-ferry/0.1.1/INSTALL_RECEIPT.json"' \
+  '    for binary in aferry agentferryd agentferry-host; do printf "%s\n" "binary" > "$root/agent-ferry/0.1.1/bin/$binary"; done' \
+  '    tar -czf "$PWD/agent-ferry--0.1.1.arm64_sonoma.bottle.tar.gz" -C "$root" agent-ferry' \
+  '    rm -rf "$root"' \
+  '    ;;' \
+  '  uninstall|untap) ;;' \
+  '  *) exit 64 ;;' \
+  'esac' >"${fake_brew}"
+chmod 700 "${fake_brew}"
+
+AGENT_FERRY_BREW_BIN="${fake_brew}" \
+AGENT_FERRY_BREW_TEST_LOG="${brew_log}" \
+AGENT_FERRY_BREW_TEST_TAP="${fake_tap}" \
+  "${script_dir}/build-homebrew-bottle" \
+    --version 0.1.1 \
+    --formula "${formula}" \
+    --output-dir "${output_dir}" \
+    --expected-tag arm64_sonoma >/dev/null
+
+bottle="${output_dir}/agent-ferry--0.1.1.arm64_sonoma.bottle.tar.gz"
+[[ -f "${bottle}" ]]
+tar -tzf "${bottle}" | grep -q '^agent-ferry/0.1.1/.brew/agent-ferry.rb$'
+tar -tzf "${bottle}" | grep -q '^agent-ferry/0.1.1/bin/agentferryd$'
+grep -q '^install --build-bottle --skip-post-install agent-ferry/bottle/agent-ferry$' "${brew_log}"
+grep -q '^bottle --skip-relocation --force-core-tap --no-rebuild agent-ferry/bottle/agent-ferry$' "${brew_log}"
+
+printf '%s\n' 'Homebrew Bottle 构建命令与归档结构契约测试通过'

@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+version=""
+formula=""
+output_dir=""
+expected_tag=""
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+brew_bin="${AGENT_FERRY_BREW_BIN:-}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --version) version="${2:-}"; shift 2 ;;
+    --formula) formula="${2:-}"; shift 2 ;;
+    --output-dir) output_dir="${2:-}"; shift 2 ;;
+    --expected-tag) expected_tag="${2:-}"; shift 2 ;;
+    *) printf '未知参数：%s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+
+if [[ -z "${version}" || -z "${formula}" || -z "${output_dir}" || -z "${expected_tag}" ]]; then
+  printf '%s\n' '必须提供 version、formula、output-dir 和 expected-tag。' >&2
+  exit 2
+fi
+if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
+  printf '无效版本号：%s\n' "${version}" >&2
+  exit 2
+fi
+if [[ ! "${expected_tag}" =~ ^(arm64_)?[a-z][a-z0-9_]*$ ]]; then
+  printf '无效 Bottle tag：%s\n' "${expected_tag}" >&2
+  exit 2
+fi
+if [[ ! -f "${formula}" || -L "${formula}" ]]; then
+  printf 'Formula 必须是普通文件：%s\n' "${formula}" >&2
+  exit 1
+fi
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  printf '%s\n' 'Homebrew Bottle 只能在 macOS 上生成。' >&2
+  exit 1
+fi
+if [[ -z "${brew_bin}" ]]; then
+  brew_bin="$(command -v brew || true)"
+fi
+if [[ -z "${brew_bin}" || ! -x "${brew_bin}" ]]; then
+  printf '%s\n' '未找到可执行的 Homebrew。' >&2
+  exit 1
+fi
+
+node_bin="$("${script_dir}/find-node")"
+"${node_bin}" "${script_dir}/check-release-version.mjs" "${version}"
+mkdir -p "${output_dir}"
+output_dir="$(cd "${output_dir}" && pwd)"
+formula="$(cd "$(dirname "${formula}")" && pwd)/$(basename "${formula}")"
+tap_name="agent-ferry/bottle"
+tap_created="false"
+installed="false"
+
+cleanup() {
+  if [[ "${installed}" == "true" ]]; then
+    HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" uninstall --force "${tap_name}/agent-ferry" >/dev/null 2>&1 || true
+  fi
+  if [[ "${tap_created}" == "true" ]]; then
+    HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" untap --force "${tap_name}" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" tap-new "${tap_name}" >/dev/null
+tap_created="true"
+tap_root="$("${brew_bin}" --repo "${tap_name}")"
+mkdir -p "${tap_root}/Formula"
+cp "${formula}" "${tap_root}/Formula/agent-ferry.rb"
+
+# Bottle 必须由 Homebrew 从已安装 keg 生成，不能把普通归档改名伪装成 Bottle。
+# 跳过 post_install 是为了避免构建 runner 注册真实 LaunchAgent；安装生命周期由独立 E2E 验证。
+HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" install \
+  --build-bottle --skip-post-install "${tap_name}/agent-ferry"
+installed="true"
+(
+  cd "${output_dir}"
+  HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" bottle \
+    --skip-relocation --force-core-tap --no-rebuild "${tap_name}/agent-ferry"
+)
+
+bottle="${output_dir}/agent-ferry--${version}.${expected_tag}.bottle.tar.gz"
+if [[ ! -f "${bottle}" ]]; then
+  printf 'Homebrew 没有生成预期 Bottle：%s\n' "${bottle}" >&2
+  exit 1
+fi
+archive_listing="${output_dir}/.agent-ferry-bottle-files"
+/usr/bin/tar -tzf "${bottle}" >"${archive_listing}"
+for required in \
+  "agent-ferry/${version}/.brew/agent-ferry.rb" \
+  "agent-ferry/${version}/INSTALL_RECEIPT.json" \
+  "agent-ferry/${version}/bin/aferry" \
+  "agent-ferry/${version}/bin/agentferryd" \
+  "agent-ferry/${version}/bin/agentferry-host"; do
+  if ! grep -qx "${required}" "${archive_listing}"; then
+    printf 'Bottle 缺少必需文件：%s\n' "${required}" >&2
+    exit 1
+  fi
+done
+rm -f "${archive_listing}"
+
+sha256="$(/usr/bin/shasum -a 256 "${bottle}" | awk '{print $1}')"
+printf 'Homebrew Bottle 已生成：%s sha256=%s\n' "${bottle}" "${sha256}"

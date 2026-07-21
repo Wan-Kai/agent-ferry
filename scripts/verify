@@ -60,6 +60,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 if [[ "$(uname -s)" == "Darwin" ]]; then
   "${script_dir}/test-homebrew-release"
+  "${script_dir}/test-homebrew-bottle-build"
 fi
 "${npm_bin}" --prefix extension test
 "${npm_bin}" --prefix extension run compile

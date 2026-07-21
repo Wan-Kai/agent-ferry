@@ -32,7 +32,7 @@ scripts/                 上下文、工程门禁与证据工具
 ./scripts/verify
 ```
 
-普通用户使用 Homebrew 管理的架构专用预编译产物，不需要安装 Rust、Node.js，也不需要
+普通用户使用 Homebrew 管理的架构专用预编译 Bottle，不需要安装 Rust、Node.js，也不需要
 Apple Developer 账号。macOS 安装轻量 Core：
 
 ```bash
@@ -42,9 +42,10 @@ brew install Wan-Kai/tap/agent-ferry
 需要已能正常运行的 Homebrew；安装预编译二进制，不要求 Rust、Node.js、Apple Developer 账号或
 `sudo`。完整命令会在 Homebrew 6 中只信任目标 Formula，不会扩大为整个 Tap 的全局信任。
 
-Formula 按 CPU 架构下载 GitHub macOS CI 生成的 ad-hoc 签名二进制，并在安装前校验固定
-SHA-256。安装后的 `post_install` 注册 Chrome Native Host 并启动当前用户的 LaunchAgent；整个
-过程不使用 `sudo`。GitHub Release 同时发布构建来源证明，Chrome 固定扩展身份仍由同一发行门禁校验。
+Formula 按 CPU 与 macOS 选择 GitHub macOS CI 生成的原生 Bottle，并在安装前校验固定 SHA-256；
+没有匹配 Bottle 时才使用预编译 fallback 归档。安装后的 `post_install` 注册 Chrome Native Host
+并启动当前用户的 LaunchAgent；整个过程不使用 `sudo`。GitHub Release 同时发布构建来源证明，
+Chrome 固定扩展身份仍由同一发行门禁校验。
 
 安装、升级和卸载行为见 [Homebrew 安装](./docs/runbooks/installation.md)，正式发布配置见
 [Homebrew 与 GitHub Release 发布](./docs/runbooks/release.md)。

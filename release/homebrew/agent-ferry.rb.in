@@ -13,6 +13,8 @@ class AgentFerry < Formula
     sha256 "__AGENT_FERRY_X86_64_SHA256__"
   end
 
+__AGENT_FERRY_BOTTLE_BLOCK__
+
   depends_on macos: :big_sur
 
   def install

@@ -2,7 +2,7 @@
 
 > 状态：Current
 > 事实来源：`.github/workflows/release.yml`、`scripts/build-macos-release`、
-> `scripts/package-homebrew-release` 与 `release/homebrew/agent-ferry.rb.in`
+> `scripts/build-homebrew-bottle` 与 `release/homebrew/agent-ferry.rb.in`
 > 范围：macOS Homebrew Core 和 Chrome ZIP；Chrome Web Store 审核见对应 Runbook
 
 ## 发布边界
@@ -29,26 +29,31 @@ Apple、Chrome 或 Hermes 凭据。
 
 ## 构建与完整性
 
-workflow 在 `macos-14` 上使用 Rust 1.85 构建最低 macOS 11 的 `arm64` 与 `x86_64` 三个
+`package` job 在 `macos-14` 上使用 Rust 1.85 构建最低 macOS 11 的 `arm64` 与 `x86_64` 三个
 二进制。`scripts/package-homebrew-release` 对复制后的每个 Mach-O 执行 ad-hoc codesign 并严格
-验证，然后生成：
+验证。随后两个原生 job 分别在 `macos-14` Apple Silicon 与 `macos-15-intel` 上用 Homebrew
+生成 `arm64_sonoma` 和 `sequoia` Bottle。最终产物为：
 
 ```text
 agent-ferry-v<version>-darwin-arm64.tar.gz
 agent-ferry-v<version>-darwin-x86_64.tar.gz
+agent-ferry--<version>.arm64_sonoma.bottle.tar.gz
+agent-ferry--<version>.sequoia.bottle.tar.gz
 agent-ferry-extension-v<version>-chrome.zip
 agent-ferry.rb
 checksums.txt
 ```
 
-Formula 固定两个 archive 的 GitHub Release URL、SHA-256 和正式扩展 ID。发布证据记录完整 commit、
-Rust/Node 版本和所有产物 SHA-256；tag 构建还由 GitHub OIDC 生成 Artifact Attestation。
+Formula 固定 Bottle root URL、双架构 tag/SHA-256、两个 fallback archive URL/SHA-256 和正式扩展
+ID。发布证据记录完整 commit、Rust/Node 版本和所有产物 SHA-256；tag 构建还由 GitHub OIDC 生成
+Artifact Attestation。
 
-打包后，macOS runner 还会创建临时 Tap，以真实 `brew install` 安装同一 Formula，并在隔离 HOME
-中验证 `post_install`、服务状态、Native Host allowlist、日志读取、`aferry uninstall` 与
-`brew uninstall`。LaunchAgent 调用使用可观察的 fake `launchctl`，因此这条门禁能证明 Homebrew
-与 Ferry 的进程/文件契约，但不能替代真实用户会话中的 launchd smoke。脱敏输出保存为
-`homebrew-e2e.log`，并由同一份 `verification.json` 绑定 SHA-256。
+汇总后，macOS runner 创建临时 Tap，先用 `brew fetch --force-bottle` 禁止 source fallback，再用真实
+`brew install` 安装同一 Formula，并要求日志出现 `Pouring ...bottle.tar.gz`。随后在隔离 HOME 中
+验证服务状态、Native Host allowlist、日志读取、`aferry uninstall` 与 `brew uninstall`。
+LaunchAgent 调用使用可观察的 fake `launchctl`，因此这条门禁能证明 Homebrew 与 Ferry 的进程/文件
+契约，但不能替代真实用户会话中的 launchd smoke。脱敏输出保存为 `homebrew-e2e.log`，并由同一份
+`verification.json` 绑定 SHA-256。
 
 ad-hoc 签名不含发布者身份。文档、Release notes 和诊断不得将其描述为 Developer ID 签名或 Apple
 公证。未来获得 Developer ID 后可以在打包前增加正式签名与公证，但不能降低当前哈希、证据和
@@ -59,12 +64,12 @@ Homebrew 所有权门禁。
 1. 保证源码版本、Chrome 版本和文档一致；
 2. 在干净 commit 上运行 `./scripts/verify --require-clean`；
 3. 手动运行 Release workflow，下载 RC Artifact；
-4. 在隔离用户上完成真实 Homebrew 安装、升级、卸载验收；
+4. 确认 RC 的两个 Bottle job 和真实 Bottle 安装、升级、卸载验收均通过；
 5. 创建不可移动的新 tag：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 tag workflow 先创建不可变 GitHub Release，再 checkout `Wan-Kai/homebrew-tap`，复制生成的 Formula
@@ -86,7 +91,7 @@ brew install Wan-Kai/tap/agent-ferry
 - GitHub Artifact Attestation；
 - Tap `Formula/agent-ferry.rb` 对应 commit；
 - RC Artifact 中的 `homebrew-e2e.log` 及其证据 SHA-256；
-- `brew fetch` 与 `brew install` 的 SHA 校验结果；
+- `brew fetch --force-bottle`、`Pouring ...bottle.tar.gz` 与 `brew install` 的 SHA 校验结果；
 - `aferry service status`、Native Host manifest 和 daemon 日志；
 - 升级后进程切换到新 keg、卸载不删除用户数据的结果。
 

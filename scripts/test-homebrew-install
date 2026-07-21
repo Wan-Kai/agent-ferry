@@ -2,18 +2,47 @@
 set -euo pipefail
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  printf '%s\n' '跳过真实 Homebrew 安装验收：当前不是 macOS。'
+  printf '%s\n' '跳过真实 Homebrew Bottle 安装验收：当前不是 macOS。'
   exit 0
 fi
 
+version=""
+distribution_dir=""
+expected_tag=""
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "${script_dir}/.." && pwd)"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --version) version="${2:-}"; shift 2 ;;
+    --distribution-dir) distribution_dir="${2:-}"; shift 2 ;;
+    --expected-tag) expected_tag="${2:-}"; shift 2 ;;
+    *) printf '未知参数：%s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+if [[ -z "${version}" || -z "${distribution_dir}" || -z "${expected_tag}" ]]; then
+  printf '%s\n' '必须提供 version、distribution-dir 和 expected-tag。' >&2
+  exit 2
+fi
+if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
+  printf '无效版本号：%s\n' "${version}" >&2
+  exit 2
+fi
+if [[ ! "${expected_tag}" =~ ^(arm64_)?[a-z][a-z0-9_]*$ ]]; then
+  printf '无效 Bottle tag：%s\n' "${expected_tag}" >&2
+  exit 2
+fi
+if [[ ! -d "${distribution_dir}" ]]; then
+  printf '发行目录不存在：%s\n' "${distribution_dir}" >&2
+  exit 1
+fi
+distribution_dir="$(cd "${distribution_dir}" && pwd)"
+
 brew_bin="${AGENT_FERRY_BREW_BIN:-/opt/homebrew/bin/brew}"
 if [[ ! -x "${brew_bin}" ]]; then
   brew_bin="/usr/local/bin/brew"
 fi
 if [[ ! -x "${brew_bin}" ]]; then
-  printf '%s\n' '未找到 Homebrew，无法执行真实安装验收。' >&2
+  printf '%s\n' '未找到 Homebrew，无法执行真实 Bottle 安装验收。' >&2
   exit 1
 fi
 if "${brew_bin}" list --versions agent-ferry >/dev/null 2>&1; then
@@ -21,12 +50,23 @@ if "${brew_bin}" list --versions agent-ferry >/dev/null 2>&1; then
   exit 1
 fi
 
+arm64_source="agent-ferry-v${version}-darwin-arm64.tar.gz"
+x86_source="agent-ferry-v${version}-darwin-x86_64.tar.gz"
+arm64_bottle="agent-ferry--${version}.arm64_sonoma.bottle.tar.gz"
+x86_bottle="agent-ferry--${version}.sequoia.bottle.tar.gz"
+for artifact in "${arm64_source}" "${x86_source}" "${arm64_bottle}" "${x86_bottle}"; do
+  if [[ ! -f "${distribution_dir}/${artifact}" ]]; then
+    printf '缺少 Homebrew 发行产物：%s\n' "${distribution_dir}/${artifact}" >&2
+    exit 1
+  fi
+done
+
 temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/agent-ferry-homebrew-e2e.XXXXXX")"
 test_home="${temporary_root}/home with spaces"
-release_dir="${temporary_root}/release"
-bin_dir="${temporary_root}/bin"
 launchctl="${temporary_root}/fake-launchctl"
-mkdir -p "${test_home}" "${release_dir}" "${bin_dir}" "${test_home}/tmp"
+formula="${temporary_root}/agent-ferry.rb"
+install_log="${temporary_root}/brew-install.log"
+mkdir -p "${test_home}" "${test_home}/tmp"
 installed="false"
 tap_name="agent-ferry/e2e"
 tap_created="false"
@@ -65,36 +105,54 @@ printf '%s\n' \
   'esac' >"${launchctl}"
 chmod 700 "${launchctl}"
 
-cargo build --locked \
-  -p agent-ferry-cli -p agent-ferry-daemon -p agent-ferry-host >/dev/null
-for binary in aferry agentferryd agentferry-host; do
-  cp "${repository_root}/target/debug/${binary}" "${bin_dir}/${binary}"
-done
-"${script_dir}/package-homebrew-release" \
-  --version 0.1.0 \
-  --arm64-bin-dir "${bin_dir}" \
-  --x86_64-bin-dir "${bin_dir}" \
-  --output-dir "${release_dir}" \
-  --base-url "file://${release_dir}" \
-  --extension-identity "${repository_root}/release/chrome-extension-identity.json" >/dev/null
+arm64_source_sha="$(shasum -a 256 "${distribution_dir}/${arm64_source}" | awk '{print $1}')"
+x86_source_sha="$(shasum -a 256 "${distribution_dir}/${x86_source}" | awk '{print $1}')"
+arm64_bottle_sha="$(shasum -a 256 "${distribution_dir}/${arm64_bottle}" | awk '{print $1}')"
+x86_bottle_sha="$(shasum -a 256 "${distribution_dir}/${x86_bottle}" | awk '{print $1}')"
+extension_id="$(plutil -extract extension_id raw -o - "${repository_root}/release/chrome-extension-identity.json")"
+node_bin="$("${script_dir}/find-node")"
+"${node_bin}" "${script_dir}/render-homebrew-formula.mjs" \
+  "${repository_root}/release/homebrew/agent-ferry.rb.in" \
+  "${formula}" \
+  "${version}" \
+  "file://${distribution_dir}/${arm64_source}" "${arm64_source_sha}" \
+  "file://${distribution_dir}/${x86_source}" "${x86_source_sha}" \
+  "${extension_id}" \
+  --bottle-root-url "file://${distribution_dir}" \
+  --arm64-bottle-tag arm64_sonoma \
+  --arm64-bottle-sha "${arm64_bottle_sha}" \
+  --x86-64-bottle-tag sequoia \
+  --x86-64-bottle-sha "${x86_bottle_sha}"
 
 HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" tap-new "${tap_name}" >/dev/null
 tap_created="true"
 tap_root="$("${brew_bin}" --repo "${tap_name}")"
 mkdir -p "${tap_root}/Formula"
-cp "${release_dir}/agent-ferry.rb" "${tap_root}/Formula/agent-ferry.rb"
+cp "${formula}" "${tap_root}/Formula/agent-ferry.rb"
+HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" trust --formula "${tap_name}/agent-ferry"
 
+# `fetch --force-bottle` 和安装日志共同证明 Formula 没有退回会触发 CLT 检查的源码路径。
+HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" fetch \
+  --force-bottle "${tap_name}/agent-ferry" >/dev/null
+HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" install \
+  --skip-post-install "${tap_name}/agent-ferry" 2>&1 | tee "${install_log}"
+installed="true"
+grep -q "Pouring agent-ferry--${version}.${expected_tag}.bottle.tar.gz" "${install_log}"
+
+prefix="$("${brew_bin}" --prefix agent-ferry)"
+aferry="${prefix}/bin/aferry"
+[[ "$("${aferry}" --version)" == "aferry ${version}" ]]
 HOME="${test_home}" \
   TMPDIR="${test_home}/tmp" \
   AGENT_FERRY_HOME="${test_home}/.agent-ferry" \
   AFERRY_LAUNCHCTL_PATH="${launchctl}" \
-  HOMEBREW_NO_AUTO_UPDATE=1 \
-  "${brew_bin}" install "${tap_name}/agent-ferry"
-installed="true"
-
-prefix="$("${brew_bin}" --prefix agent-ferry)"
-aferry="${prefix}/bin/aferry"
-[[ "$("${aferry}" --version)" == 'aferry 0.1.0' ]]
+  "${aferry}" service install --daemon-path "${prefix}/bin/agentferryd" >/dev/null
+HOME="${test_home}" \
+  TMPDIR="${test_home}/tmp" \
+  AGENT_FERRY_HOME="${test_home}/.agent-ferry" \
+  "${aferry}" native-host register \
+    --extension-id "${extension_id}" \
+    --host-path "${prefix}/bin/agentferry-host" >/dev/null
 HOME="${test_home}" \
   AGENT_FERRY_HOME="${test_home}/.agent-ferry" \
   AFERRY_LAUNCHCTL_PATH="${launchctl}" \
@@ -102,17 +160,17 @@ HOME="${test_home}" \
 
 manifest="${test_home}/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.agentferry.host.json"
 [[ -f "${manifest}" ]]
-/usr/bin/plutil -extract allowed_origins.0 raw -o - "${manifest}" |
-  grep -q '^chrome-extension://ommpdijpcidnicpbalkpnggoljhapcel/$'
-/usr/bin/plutil -extract path raw -o - "${manifest}" | grep -q '/opt/agent-ferry/bin/agentferry-host$'
+plutil -extract allowed_origins.0 raw -o - "${manifest}" |
+  grep -q "^chrome-extension://${extension_id}/$"
+plutil -extract path raw -o - "${manifest}" | grep -q '/opt/agent-ferry/bin/agentferry-host$'
 
 log_dir="${test_home}/Library/Logs/Agent Ferry"
 mkdir -p "${log_dir}"
-printf '%s\n' 'homebrew-e2e-log' >"${log_dir}/agentferryd.log"
+printf '%s\n' 'homebrew-bottle-e2e-log' >"${log_dir}/agentferryd.log"
 HOME="${test_home}" \
   AGENT_FERRY_HOME="${test_home}/.agent-ferry" \
   AFERRY_LAUNCHCTL_PATH="${launchctl}" \
-  "${aferry}" service logs --lines 10 | grep -q 'homebrew-e2e-log'
+  "${aferry}" service logs --lines 10 | grep -q 'homebrew-bottle-e2e-log'
 
 uninstall_report="${temporary_root}/uninstall.json"
 HOME="${test_home}" \
@@ -133,4 +191,4 @@ if "${brew_bin}" list --versions agent-ferry >/dev/null 2>&1; then
 fi
 HOMEBREW_NO_AUTO_UPDATE=1 "${brew_bin}" untap --force "${tap_name}" >/dev/null
 tap_created="false"
-printf '真实 Homebrew 安装、激活、状态、日志和双阶段卸载通过；测试根目录：%s\n' "${temporary_root}"
+printf '真实 Homebrew Bottle 下载、安装、激活、状态、日志和双阶段卸载通过；Bottle tag：%s\n' "${expected_tag}"
