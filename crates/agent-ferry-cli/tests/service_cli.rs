@@ -101,6 +101,44 @@ esac
         assert!(String::from_utf8_lossy(&activated.stdout).contains("\"state\":\"activated\""));
     }
 
+    let workspace = home.join("workspace");
+    fs::create_dir_all(&workspace).expect("创建默认 Workspace");
+    make_executable(
+        &bin.join("claude"),
+        r#"#!/bin/sh
+case "$1" in
+  --version) echo '2.1.197 (Claude Code)' ;;
+  --help) echo '--print --output-format --permission-mode bypassPermissions' ;;
+  auth) echo '{"loggedIn":true}' ;;
+  *) exit 2 ;;
+esac
+"#,
+    );
+    let connected = Command::new(&packaged_aferry)
+        .env("HOME", &home)
+        .env("AGENT_FERRY_HOME", home.join(".agent-ferry"))
+        .env("AFERRY_LAUNCHCTL_PATH", &launchctl)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .args([
+            "activate",
+            "--yes",
+            "--workspace",
+            workspace.to_str().expect("Workspace 路径 UTF-8"),
+        ])
+        .output()
+        .expect("运行一键 Agent 连接");
+    assert!(
+        connected.status.success(),
+        "一键连接失败: {}",
+        String::from_utf8_lossy(&connected.stderr)
+    );
+    let connected_stdout = String::from_utf8_lossy(&connected.stdout);
+    assert!(connected_stdout.contains("发现可连接的本地 Agent"));
+    assert!(connected_stdout.contains("✓ Claude Code"));
+    assert!(connected_stdout.contains("✓ 运行位置 workspace"));
+    assert!(home.join(".agent-ferry/config/claude-code.json").exists());
+    assert!(home.join(".agent-ferry/config/workspaces.json").exists());
+
     let plist = home.join("Library/LaunchAgents/com.agentferry.daemon.plist");
     let plist_program = Command::new("/usr/bin/plutil")
         .args(["-extract", "ProgramArguments.0", "raw", "-o", "-"])

@@ -468,7 +468,7 @@ fn sanitize_remote_error(stderr: &[u8]) -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum HermesSetupError {
-    #[error("SSH host 无效；请使用单一 ~/.ssh/config host，不能包含空白或以 - 开头")]
+    #[error("SSH 目标无效；请使用 user@host 或单一 ~/.ssh/config Host，不能包含空白或以 - 开头")]
     InvalidSshHost,
     #[error("Docker 容器名称无效")]
     InvalidContainer,

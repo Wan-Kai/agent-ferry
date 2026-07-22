@@ -48,12 +48,57 @@ aferry activate
 该命令从当前安装包中发现 `agentferryd` 与 `agentferry-host`，安装并启动当前用户的
 `com.agentferry.daemon` LaunchAgent，并注册只允许正式 Chrome Item ID 连接的 Native Host。命令
 幂等，中断后可以直接重试；它不会安装 Claude Code、Codex、OpenCode 或 Hermes，也不会读取
-Hermes Keychain 凭据。安装后检查：
+Hermes Keychain 凭据。
+
+在交互终端中，`activate` 随后只通过各 Agent 的公开 CLI 命令检测本机候选，展示版本与默认运行
+位置，并询问 `连接以上 Agent？ [Y/n]`。用户确认后才保存兼容的 Agent 绑定；首次没有
+Workspace 时，把运行 `activate` 的当前目录保存为默认运行位置。存在多个候选时，命令会展示
+实际选择的可执行路径供用户确认，并按发现优先级连接首个通过兼容性检查的版本。自动化环境可以显式执行：
+
+```bash
+aferry activate --yes --workspace '/path/to/project'
+```
+
+`--json` 保持非交互，只激活 Core，不修改 Agent 或 Workspace 配置。安装后检查：
 
 ```bash
 aferry service status
 aferry doctor
 ```
+
+## 连接远程 Hermes
+
+标准 Docker Hermes 的普通用户入口只需要 OpenSSH 目标。目标可以是 `user@host`，也可以是
+`~/.ssh/config` 中已经配置的 Host：
+
+```bash
+aferry connect hermes root@example.com
+```
+
+命令默认查找名为 `hermes` 的官方 `nousresearch/hermes-agent` 容器，根据服务器地址生成连接名称，
+复用现有的安全预检、回滚、Keychain 和 SSH Tunnel 流程。它会在修改远端容器前展示计划并要求
+确认；非交互自动化只有在用户已经审阅计划后才使用 `--yes`。显示名称可以单独指定：
+
+```bash
+aferry connect hermes root@example.com --name my-hermes
+```
+
+自定义容器名称或已有 API Server 仍使用进阶命令：
+
+```bash
+aferry connection setup hermes \
+  --name my-hermes \
+  --ssh-host root@example.com \
+  --container custom-hermes
+
+aferry connection add hermes \
+  --name my-hermes \
+  --url https://hermes.example.com \
+  --token-stdin
+```
+
+SSH 必须已经可以使用公钥非交互登录。命令不会收集服务器密码，也不会把 Hermes Token 写入 shell
+历史或普通本机文件；正式构建将凭据保存在 macOS Keychain。
 
 早期开发版本的数据位于 `~/Library/Application Support/Agent Ferry`。Homebrew 不静默搬移开发
 数据；需要保留时，先停止旧 daemon，再执行：

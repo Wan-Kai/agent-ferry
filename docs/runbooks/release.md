@@ -69,8 +69,8 @@ Homebrew 所有权门禁。
 5. 创建不可移动的新 tag：
 
 ```bash
-git tag v0.1.4
-git push origin v0.1.4
+git tag v0.1.5
+git push origin v0.1.5
 ```
 
 tag workflow 先创建不可变 GitHub Release，再 checkout `Wan-Kai/homebrew-tap`，复制生成的 Formula

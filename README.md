@@ -1,109 +1,139 @@
 # Agent Ferry
 
-Agent Ferry 是一个本地优先的浏览器到 AI Agent 内容交接工具。
+把浏览器里正在阅读的论文、帖子和文档，连同你写下的任务指令，直接交给本地 AI Agent 或自己的远程 Hermes。
 
-当前版本通过 Chrome 扩展提取网页实际内容，由本地 Rust daemon 将任务交给远程 Hermes，或在选定 Workspace 中启动 Claude Code、Codex 和 OpenCode。daemon 保存有界的本地任务历史，宿主 Agent 的认证、会话和文件仍由宿主自己管理。
+Agent Ferry 不提供模型，也不会替你安装 Claude Code、Codex、OpenCode 或 Hermes。它只负责从浏览器安全地把当前页面交给你选择的 Agent。
 
-当前实现与模块边界见 [CONTEXT.md](./CONTEXT.md) 和 [当前架构](./docs/architecture/overview.md)。早期 V0.1 方案与产品路线图保留为带状态的设计资料，不能替代当前代码事实。
+## 开始使用
 
-数据处理与用户删除方式见 [隐私政策](./PRIVACY.md)。
+### 1. 安装 Chrome 扩展
 
-## 当前目录
+[从 Chrome Web Store 安装 Agent Ferry](https://chromewebstore.google.com/detail/agent-ferry/ommpdijpcidnicpbalkpnggoljhapcel)
 
-```text
-crates/
-  agent-ferry-core/      领域模型与核心流程
-  agent-ferry-protocol/  Chrome Native Messaging 协议
-  agent-ferry-cli/       aferry 命令行程序
-  agent-ferry-host/      agentferry-host Native Messaging Host
-  agent-ferry-daemon/    agentferryd 本地交接中枢
-  agent-ferry-*/         Agent 与远程服务适配器
-extension/               WXT + React + TypeScript Chrome 扩展
-docs/                    当前架构、ADR、Runbook 与历史设计
-scripts/                 上下文、工程门禁与证据工具
-```
+当前首发版本支持 macOS。
 
-## 开发
-
-完整开发约定见 [本地开发与验证](./docs/runbooks/development.md)。常用入口：
-
-```bash
-./scripts/context <目标路径...>
-./scripts/verify
-```
-
-普通用户使用 Homebrew 管理的架构专用预编译 Bottle，不需要安装 Rust、Node.js，也不需要
-Apple Developer 账号。macOS 安装轻量 Core：
+### 2. 安装并激活 Core
 
 ```bash
 brew install Wan-Kai/tap/agent-ferry
 aferry activate
 ```
 
-需要已能正常运行的 Homebrew；安装预编译二进制，不要求 Rust、Node.js、Apple Developer 账号或
-`sudo`。完整命令会在 Homebrew 6 中只信任目标 Formula，不会扩大为整个 Tap 的全局信任。
+`aferry activate` 会启动本地服务、连接 Chrome，并检测已经安装的本地 Agent：
 
-Formula 按 CPU 与 macOS 选择 GitHub macOS CI 生成的原生 Bottle，并在安装前校验固定 SHA-256；
-没有匹配 Bottle 时才使用预编译 fallback 归档。Homebrew 只管理程序文件；用户随后执行幂等的
-`aferry activate`，在正常终端环境中注册 Chrome Native Host 并启动当前用户的 LaunchAgent，整个
-过程不使用 `sudo`。GitHub Release 同时发布构建来源证明，Chrome 固定扩展身份仍由同一发行门禁
-校验。
+```text
+发现可连接的本地 Agent
+  Claude Code  2.1.197
+  OpenCode     1.17.18
+  Codex        0.144.5
 
-安装、升级和卸载行为见 [Homebrew 安装](./docs/runbooks/installation.md)，正式发布配置见
-[Homebrew 与 GitHub Release 发布](./docs/runbooks/release.md)。
-
-Chrome 发行构建与 Core 发行包共用同一份扩展身份文件。正式 Item ID 与 public key 录入后，发行脚本会校验二者对应关系，并把同一个 ID 写入 Native Host allowlist：
-
-```bash
-./scripts/package-chrome-extension \
-  --extension-identity release/chrome-extension-identity.json \
-  --output-dir target/distribution
+连接以上 Agent？ [Y/n]
 ```
 
-升级由 Homebrew 负责；升级后重新激活，让 daemon 和 Native Host 切换到新 keg：
+直接按回车即可连接。首次连接会把执行 `aferry activate` 时所在的目录保存为默认运行位置；请先 `cd` 到你希望 Agent 启动的项目目录，或者显式指定：
 
 ```bash
+aferry activate --yes --workspace '/path/to/your/project'
+```
+
+Agent Ferry 只连接已经存在且通过兼容性检查的 Agent。检测不到某个产品时，请先使用该产品的官方方式完成安装和登录。
+
+### 3. 发送当前页面
+
+打开任意网页，点击浏览器工具栏中的 Agent Ferry：
+
+1. 选择 Agent。
+2. 选择运行位置。
+3. 检查或修改完整任务指令。
+4. 点击开始。
+
+页面正文只会在你点击开始后读取，并且只发送给你选择的 Agent。
+
+## 连接远程 Hermes
+
+如果 Hermes 使用官方 Docker 镜像部署在自己的服务器上，并且本机已经可以通过 SSH 公钥登录，只需要提供服务器地址：
+
+```bash
+aferry connect hermes root@example.com
+```
+
+Agent Ferry 会检查服务器、识别标准 Hermes 容器、建立安全通道并验证连接。连接名称默认根据服务器生成，也可以自定义：
+
+```bash
+aferry connect hermes root@example.com --name my-hermes
+```
+
+命令执行前会展示将要进行的远端变更并等待确认。完成后重新打开 Chrome 扩展，选择 Hermes 和对应的远程位置即可。
+
+如果服务器包含多个 Hermes 容器、自定义 Docker 参数，或者已经公开了受保护的 Runs API，请参考[远程 Hermes 进阶配置](./docs/runbooks/installation.md#连接远程-hermes)。
+
+## 当前支持
+
+- Claude Code
+- Codex CLI
+- Codex App
+- OpenCode
+- 远程 Hermes
+- 普通网页、X/Twitter、arXiv HTML 与 arXiv PDF
+
+YouTube 专用提取仍在完善中。
+
+## 检查状态
+
+```bash
+aferry doctor
+```
+
+查看本地服务日志：
+
+```bash
+aferry service logs --lines 100
+```
+
+## 升级
+
+```bash
+brew update
 brew upgrade Wan-Kai/tap/agent-ferry
 aferry activate
 ```
 
-默认卸载只移除 Agent Ferry 程序、后台服务和 Native Host，保留用户数据、日志与凭据：
+已有 Agent、运行位置和 Hermes 连接会保留；`activate` 只会提示新发现但尚未连接的 Agent。
+
+## 卸载
+
+保留配置、历史和 Hermes 凭据：
 
 ```bash
 aferry uninstall
 brew uninstall Wan-Kai/tap/agent-ferry
 ```
 
-确认不再需要恢复配置、历史和远程 Hermes 连接时，才执行彻底清理：
+彻底删除全部 Agent Ferry 数据：
 
 ```bash
 aferry uninstall --purge --yes
 brew uninstall Wan-Kai/tap/agent-ferry
 ```
 
-## 用户数据目录
+## 隐私与安全
 
-当前版本默认把配置、任务历史和运行状态保存在 `~/.agent-ferry`。`AGENT_FERRY_HOME` 只用于测试或显式的开发隔离。
+- 网页正文不会经过 Agent Ferry 提供的云端服务。
+- Hermes Token 保存在 macOS Keychain。
+- Prompt、目标和运行位置在发送前对用户可见。
+- Agent 仍以当前 macOS 用户权限运行；运行位置不是文件沙箱。
 
-早期开发构建使用过 `~/Library/Application Support/Agent Ferry`。停止旧的 `agentferryd` 后可以执行：
+详细说明见[隐私政策](./PRIVACY.md)。
+
+## 开发与架构
+
+开发者入口：
+
+- [当前架构](./docs/architecture/overview.md)
+- [本地开发与验证](./docs/runbooks/development.md)
+- [安装与故障处理](./docs/runbooks/installation.md)
+- [真实环境验收](./docs/runbooks/real-environment-acceptance.md)
 
 ```bash
-aferry data migrate
+./scripts/verify
 ```
-
-只有旧目录存在且新目录不存在时才会原子迁移；命令不会合并或覆盖两个已有目录。Homebrew 不会
-静默迁移开发数据，具体停止服务和迁移顺序见安装 Runbook。
-
-## macOS daemon
-
-`agentferryd` 由当前用户的 LaunchAgent 管理，不需要管理员权限：
-
-```bash
-aferry service install
-aferry service status
-aferry service logs --lines 100
-aferry service restart
-aferry service uninstall
-```
-
-`service uninstall` 只移除后台服务；`aferry uninstall` 才是完整产品卸载入口。详细行为见 [macOS daemon 服务管理](./docs/runbooks/macos-service.md) 和 [macOS 安装与发行包](./docs/runbooks/installation.md)。

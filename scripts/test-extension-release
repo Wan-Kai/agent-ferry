@@ -13,7 +13,7 @@ printf '%s\n' '{"schema_version":1,"extension_id":"bmbgkcbcohmlbiaigfoilnaobdoon
   --extension-identity "${identity}" \
   --output-dir "${temporary_root}/release" >/dev/null
 
-archive="${temporary_root}/release/agent-ferry-extension-v0.1.4-chrome.zip"
+archive="${temporary_root}/release/agent-ferry-extension-v0.1.5-chrome.zip"
 [[ -f "${archive}" ]]
 [[ -f "${archive}.sha256" ]]
 /usr/bin/unzip -p "${archive}" manifest.json >"${temporary_root}/manifest.json"

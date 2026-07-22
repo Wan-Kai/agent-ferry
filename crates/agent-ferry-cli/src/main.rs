@@ -49,7 +49,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum CliCommand {
     /// 激活后台服务并注册正式 Chrome Native Host
-    Activate(OutputArgs),
+    Activate(ActivateArgs),
     /// 只读检查当前安装状态并给出下一步命令
     Setup(OutputArgs),
     /// 只读执行完整健康检查；发现问题时返回非零退出码
@@ -63,6 +63,11 @@ enum CliCommand {
     Connection {
         #[command(subcommand)]
         command: ConnectionCommand,
+    },
+    /// 使用最少参数连接本地或远程 Agent
+    Connect {
+        #[command(subcommand)]
+        command: ConnectCommand,
     },
     /// 管理本地 Agent 绑定
     Agent {
@@ -106,6 +111,19 @@ enum CliCommand {
         #[command(subcommand)]
         command: DevCommand,
     },
+}
+
+#[derive(Debug, Clone, Args)]
+struct ActivateArgs {
+    /// 输出稳定 JSON，供安装器或后续 GUI 使用；JSON 模式不会进入交互配置
+    #[arg(long)]
+    json: bool,
+    /// 接受检测结果并使用当前目录或 --workspace 作为默认运行位置
+    #[arg(long, conflicts_with = "json")]
+    yes: bool,
+    /// 一键连接本地 Agent 时保存为默认运行位置
+    #[arg(long, requires = "yes")]
+    workspace: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -358,12 +376,27 @@ enum ConnectionCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum ConnectCommand {
+    /// 通过 SSH 自动准备并连接标准 Docker Hermes
+    Hermes {
+        /// OpenSSH 目标，例如 root@example.com 或 ~/.ssh/config 中的 Host
+        ssh_host: String,
+        /// 浏览器中显示的连接名称；默认根据服务器地址生成
+        #[arg(long)]
+        name: Option<String>,
+        /// 跳过远端变更计划确认
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum ConnectionSetupKind {
     /// 识别并安全配置官方 Docker gateway 容器
     Hermes {
         #[arg(long)]
         name: String,
-        /// 必须是可通过公钥非交互登录的 ~/.ssh/config host
+        /// 可通过公钥非交互登录的 user@host 或 ~/.ssh/config Host
         #[arg(long)]
         ssh_host: String,
         /// 远端 Docker 容器名称
@@ -449,7 +482,7 @@ fn run(cli: Cli) -> Result<i32, CliError> {
             println!("Agent Ferry {}", env!("CARGO_PKG_VERSION"));
             Ok(0)
         }
-        Some(CliCommand::Activate(output)) => run_activate(&output),
+        Some(CliCommand::Activate(args)) => run_activate(&args),
         Some(CliCommand::Setup(args)) => {
             let report = collect_report()?;
             print_report(&report, args.json)?;
@@ -474,6 +507,7 @@ fn run(cli: Cli) -> Result<i32, CliError> {
             Ok(0)
         }
         Some(CliCommand::Connection { command }) => run_connection_command(command),
+        Some(CliCommand::Connect { command }) => run_connect_command(command),
         Some(CliCommand::Agent { command }) => run_agent_command(command),
         Some(CliCommand::Workspace { command }) => run_workspace_command(command),
         Some(CliCommand::Data { command }) => run_data_command(command),
@@ -503,7 +537,7 @@ fn run(cli: Cli) -> Result<i32, CliError> {
     }
 }
 
-fn run_activate(output: &OutputArgs) -> Result<i32, CliError> {
+fn run_activate(args: &ActivateArgs) -> Result<i32, CliError> {
     let executable_dir = env::current_exe()?
         .parent()
         .ok_or_else(|| io::Error::other("aferry 可执行文件没有父目录"))?
@@ -516,7 +550,7 @@ fn run_activate(output: &OutputArgs) -> Result<i32, CliError> {
     register_native_host(PUBLIC_CHROME_EXTENSION_ID, &host_path)?;
     let manager = service::ServiceManager::discover()?;
     let report = manager.install(Some(&daemon_path))?;
-    if output.json {
+    if args.json {
         println!(
             "{}",
             serde_json::json!({
@@ -529,9 +563,212 @@ fn run_activate(output: &OutputArgs) -> Result<i32, CliError> {
         println!("Agent Ferry 已激活");
         println!("  Chrome 扩展: {PUBLIC_CHROME_EXTENSION_ID}");
         println!("  后台服务: {:?}", report.state);
+        offer_local_agent_setup(args)?;
         println!("  下一步: aferry doctor");
     }
     Ok(0)
+}
+
+#[derive(Debug, Default)]
+struct LocalAgentOffer {
+    claude: Option<PathBuf>,
+    opencode: Option<PathBuf>,
+    codex: Option<PathBuf>,
+    rows: Vec<String>,
+    notes: Vec<String>,
+}
+
+fn offer_local_agent_setup(args: &ActivateArgs) -> Result<(), CliError> {
+    let paths = AgentFerryPaths::discover()?;
+    let offer = inspect_unbound_local_agents(&paths)?;
+    if offer.rows.is_empty() {
+        if !offer.notes.is_empty() {
+            println!();
+            for note in offer.notes {
+                println!("  {note}");
+            }
+        }
+        return Ok(());
+    }
+
+    let workspace_path = args.workspace.clone().unwrap_or(env::current_dir()?);
+    println!();
+    println!("发现可连接的本地 Agent");
+    for row in &offer.rows {
+        println!("  {row}");
+    }
+    for note in &offer.notes {
+        println!("  {note}");
+    }
+    if agent_ferry_core::workspace::load(&paths)?
+        .workspaces
+        .is_empty()
+    {
+        println!("  默认运行位置: {}", workspace_path.display());
+    }
+
+    let confirmed = if args.yes {
+        true
+    } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        prompt_yes_default("连接以上 Agent？ [Y/n] ")?
+    } else {
+        println!("  运行 aferry activate --yes --workspace <目录> 可非交互连接");
+        false
+    };
+    if !confirmed {
+        println!("已跳过本地 Agent 连接；之后可重新运行 aferry activate");
+        return Ok(());
+    }
+
+    if let Some(executable) = offer.claude {
+        let diagnosis = agent_ferry_claude::bind(&paths, &executable)?;
+        println!(
+            "  ✓ Claude Code {}",
+            diagnosis.version.as_deref().unwrap_or("")
+        );
+    }
+    if let Some(executable) = offer.opencode {
+        let diagnosis = agent_ferry_opencode::bind(&paths, &executable, DEFAULT_OPENCODE_MODEL)?;
+        println!(
+            "  ✓ OpenCode {}",
+            diagnosis.version.as_deref().unwrap_or("")
+        );
+    }
+    if let Some(executable) = offer.codex {
+        let diagnosis = agent_ferry_codex::bind(&paths, &executable)?;
+        println!("  ✓ Codex {}", diagnosis.version.as_deref().unwrap_or(""));
+    }
+    ensure_default_workspace(&paths, &workspace_path)?;
+    println!("本地 Agent 已连接，重新打开 Chrome 扩展即可使用");
+    Ok(())
+}
+
+fn inspect_unbound_local_agents(paths: &AgentFerryPaths) -> Result<LocalAgentOffer, CliError> {
+    let mut offer = LocalAgentOffer::default();
+    if !paths.claude_binding.exists() {
+        let diagnosis = agent_ferry_claude::diagnose_binding(paths)?;
+        let selected = if diagnosis.state == ClaudeState::Ready {
+            diagnosis
+                .executable
+                .clone()
+                .map(|path| (path, diagnosis.version))
+        } else if diagnosis.state == ClaudeState::NeedsSelection {
+            diagnosis.candidates.into_iter().find_map(|candidate| {
+                let candidate_diagnosis = agent_ferry_claude::diagnose_executable(&candidate);
+                (candidate_diagnosis.state == ClaudeState::Ready)
+                    .then_some((candidate, candidate_diagnosis.version))
+            })
+        } else {
+            None
+        };
+        if let Some((executable, version)) = selected {
+            offer.rows.push(format!(
+                "Claude Code  {}  {}",
+                version.as_deref().unwrap_or("版本未知"),
+                executable.display()
+            ));
+            offer.claude = Some(executable);
+        } else if diagnosis.state == ClaudeState::NeedsSelection {
+            offer
+                .notes
+                .push("Claude Code：发现了候选版本，但没有可直接连接的版本".to_owned());
+        }
+    }
+    if !paths.opencode_binding.exists() {
+        let diagnosis = agent_ferry_opencode::diagnose_binding(paths)?;
+        let selected = if diagnosis.state == OpenCodeState::Ready {
+            diagnosis
+                .executable
+                .clone()
+                .map(|path| (path, diagnosis.version))
+        } else if diagnosis.state == OpenCodeState::NeedsSelection {
+            diagnosis.candidates.into_iter().find_map(|candidate| {
+                let candidate_diagnosis =
+                    agent_ferry_opencode::diagnose_executable(&candidate, DEFAULT_OPENCODE_MODEL);
+                (candidate_diagnosis.state == OpenCodeState::Ready)
+                    .then_some((candidate, candidate_diagnosis.version))
+            })
+        } else {
+            None
+        };
+        if let Some((executable, version)) = selected {
+            offer.rows.push(format!(
+                "OpenCode     {}  {}",
+                version.as_deref().unwrap_or("版本未知"),
+                executable.display()
+            ));
+            offer.opencode = Some(executable);
+        } else if diagnosis.state == OpenCodeState::NeedsSelection {
+            offer
+                .notes
+                .push("OpenCode：发现了候选版本，但没有可直接连接的版本".to_owned());
+        }
+    }
+    if !paths.codex_binding.exists() {
+        let diagnosis = agent_ferry_codex::diagnose_binding(paths)?;
+        let selected = if diagnosis.state == CodexState::Ready {
+            diagnosis
+                .executable
+                .clone()
+                .map(|path| (path, diagnosis.version))
+        } else if diagnosis.state == CodexState::NeedsSelection {
+            diagnosis.candidates.into_iter().find_map(|candidate| {
+                let candidate_diagnosis = agent_ferry_codex::diagnose_executable(&candidate);
+                (candidate_diagnosis.state == CodexState::Ready)
+                    .then_some((candidate, candidate_diagnosis.version))
+            })
+        } else {
+            None
+        };
+        if let Some((executable, version)) = selected {
+            offer.rows.push(format!(
+                "Codex        {}  {}",
+                version.as_deref().unwrap_or("版本未知"),
+                executable.display()
+            ));
+            offer.codex = Some(executable);
+        } else if diagnosis.state == CodexState::NeedsSelection {
+            offer
+                .notes
+                .push("Codex：发现了候选版本，但没有可直接连接的版本".to_owned());
+        }
+    }
+    Ok(offer)
+}
+
+fn ensure_default_workspace(paths: &AgentFerryPaths, path: &Path) -> Result<(), CliError> {
+    if !agent_ferry_core::workspace::load(paths)?
+        .workspaces
+        .is_empty()
+    {
+        return Ok(());
+    }
+    let canonical = path.canonicalize().map_err(|_| {
+        agent_ferry_core::workspace::WorkspaceError::DirectoryMissing(path.to_owned())
+    })?;
+    let name = canonical
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("workspace");
+    let workspace = agent_ferry_core::workspace::add(paths, name, &canonical)?;
+    println!(
+        "  ✓ 运行位置 {}  {}",
+        workspace.name,
+        workspace.path.display()
+    );
+    Ok(())
+}
+
+fn prompt_yes_default(prompt: &str) -> Result<bool, CliError> {
+    print!("{prompt}");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "" | "y" | "yes"
+    ))
 }
 
 fn run_service_command(command: ServiceCommand) -> Result<i32, CliError> {
@@ -1113,9 +1350,7 @@ fn collect_report() -> Result<SetupReport, CliError> {
     }
     let hermes_connections = diagnoses_from_targets(&paths, None, &target_statuses)?;
     if hermes_connections.is_empty() {
-        next_actions.push(
-            "运行 aferry connection add hermes --name <name> --url <url> --token-stdin".to_owned(),
-        );
+        next_actions.push("运行 aferry connect hermes <user@host> 快速连接远程 Hermes".to_owned());
     } else if hermes_connections
         .iter()
         .any(|diagnosis| diagnosis.state != DiagnosisState::Ready)
@@ -1228,6 +1463,40 @@ fn run_connection_command(command: ConnectionCommand) -> Result<i32, CliError> {
             Ok(0)
         }
     }
+}
+
+fn run_connect_command(command: ConnectCommand) -> Result<i32, CliError> {
+    let paths = AgentFerryPaths::discover()?;
+    match command {
+        ConnectCommand::Hermes {
+            ssh_host,
+            name,
+            yes,
+        } => {
+            let name = name.unwrap_or_else(|| default_hermes_connection_name(&ssh_host));
+            setup_docker_hermes(&paths, &name, &ssh_host, "hermes", yes)
+        }
+    }
+}
+
+fn default_hermes_connection_name(ssh_host: &str) -> String {
+    let host = ssh_host.rsplit_once('@').map_or(ssh_host, |(_, host)| host);
+    let label = host
+        .trim_matches(['[', ']'])
+        .split(['.', ':'])
+        .find(|part| !part.is_empty())
+        .unwrap_or("remote");
+    let normalized = label
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    format!("{normalized}-hermes")
 }
 
 fn run_hermes_input(
@@ -1815,4 +2084,41 @@ enum CliError {
     HermesSetup(#[from] hermes_setup::HermesSetupError),
     #[error("agentferryd 拒绝命令: {0}")]
     DaemonRejected(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quick_hermes_name_hides_ssh_details() {
+        assert_eq!(
+            default_hermes_connection_name("root@ktoon.site"),
+            "ktoon-hermes"
+        );
+        assert_eq!(
+            default_hermes_connection_name("home-server"),
+            "home-server-hermes"
+        );
+    }
+
+    #[test]
+    fn quick_hermes_command_accepts_only_the_server_by_default() {
+        let cli = Cli::try_parse_from(["aferry", "connect", "hermes", "root@ktoon.site"])
+            .expect("解析 Hermes 快速连接");
+        let Some(CliCommand::Connect {
+            command:
+                ConnectCommand::Hermes {
+                    ssh_host,
+                    name,
+                    yes,
+                },
+        }) = cli.command
+        else {
+            panic!("应解析为 Hermes 快速连接");
+        };
+        assert_eq!(ssh_host, "root@ktoon.site");
+        assert_eq!(name, None);
+        assert!(!yes);
+    }
 }
